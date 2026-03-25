@@ -1,0 +1,752 @@
+"""
+backtest.py — Full-Strategy Swing Trading Backtest  (concurrent positions)
+===========================================================================
+Mirrors the live screener exactly — all strategy logic is imported from
+strategies/breakout.py (single source of truth).
+
+Pipeline (each day)
+-------------------
+  Stage 0  Market regime  : Nifty close > EMA50
+  Stage 1  Trend          : stock close > EMA50 > EMA200
+  Stage 2  Coil           : range < MAX_RANGE_PCT, close near high
+  Stage 3  Volume         : surge ratio >= VOLUME_MIN_RATIO
+  Scoring                 : Risk(40) + Range(35) + Trend(25)
+
+Trade mechanics
+---------------
+  Entry    : period_high — confirmed when next bar closes at or above level
+  Stop     : period_low  (box bottom)
+  Target   : entry + REWARD_RATIO × risk   (default 1:2 RR)
+  Breakeven: SL raised to entry once High >= entry + 1.5R AND Close > entry
+  Max hold : trailing stop EMA20 on close
+
+Concurrent positions
+--------------------
+  Up to MAX_CONCURRENT_TRADES open simultaneously.
+  Each new trade risks exactly RISK_PER_TRADE % of current equity.
+
+Usage
+-----
+  python backtest.py                        # default (breakout) strategy
+  python backtest.py --strategy breakout    # explicit strategy name
+"""
+
+import sys
+import argparse
+from collections import defaultdict
+import pandas as pd
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
+# ── Shared imports ────────────────────────────────────────────────────────────
+from datetime import datetime
+from data.cache import fetch_ohlcv
+from config.stocks   import STOCKS, SECTORS
+from config.settings import (
+    NIFTY_TICKER,
+    EMA_LONG,
+    COIL_CANDLES,
+    MAX_RANGE_PCT,
+    NEAR_HIGH_PCT,
+    REWARD_RATIO,
+    VOLUME_AVG_PERIOD,
+    VOLUME_MIN_RATIO,
+    MIN_SCORE_THRESHOLD,
+    MAX_CONCURRENT_TRADES,
+    MAX_TRADES_PER_SECTOR,
+    MAX_POSITION_PCT,
+    WALK_FORWARD_SPLIT_YEAR,
+    STARTING_EQUITY,
+    RISK_PER_TRADE,
+    SLIPPAGE_PCT,
+    COST_PCT,
+    BACKTEST_FETCH_DAYS,
+    BACKTEST_DAYS,
+    MIN_PRICE,
+    EARLY_TREND_MAX_TRADES_FACTOR,
+)
+from strategies.breakout import (
+    add_indicators,
+    get_market_regime,
+    check_trend,
+    check_consolidation,
+    check_volume,
+    check_liquidity,
+    score_breakout,
+)
+
+
+# ── Sector helper ─────────────────────────────────────────────────────────────
+
+def get_sector(ticker: str) -> str:
+    """Return the sector for a ticker (strips .NS/.BO); falls back to 'OTHER'."""
+    return SECTORS.get(ticker.split(".")[0], "OTHER")
+
+
+# ── Data helpers ──────────────────────────────────────────────────────────────
+
+def fetch_ticker(
+    ticker:  str,
+    days:    int  = BACKTEST_FETCH_DAYS,
+    refresh: bool = False,
+) -> pd.DataFrame | None:
+    """
+    Return daily OHLCV for one ticker.  Delegates to data.cache so repeated
+    backtest runs skip the API and load from  data/<ticker>.csv  instead.
+    Pass refresh=True to force a fresh download (e.g. next-day update).
+    """
+    return fetch_ohlcv(ticker, days, refresh=refresh)
+
+
+def fetch_all(tickers: list[str]) -> dict[str, pd.DataFrame]:
+    """Fetch all tickers, print bar counts, skip failures."""
+    data = {}
+    for t in tickers:
+        print(f"  Fetching {t:<20} ...", end=" ", flush=True)
+        df = fetch_ticker(t)
+        if df is None:
+            print("FAILED — skipped")
+        else:
+            print(f"{len(df)} bars")
+            data[t] = df
+    return data
+
+
+# ── Candidate scanner ─────────────────────────────────────────────────────────
+
+def scan_candidates(
+    stock_data: dict[str, pd.DataFrame],
+    date: pd.Timestamp,
+) -> list[dict]:
+    """
+    Return all stocks passing Liquidity + Trend + Coil + Volume filters for
+    `date`, each carrying its score and trade levels.  Sorted best-first.
+
+    All filter logic delegates to strategies/breakout.py — no duplication.
+    """
+    candidates = []
+
+    for ticker, df in stock_data.items():
+        if date not in df.index:
+            continue
+        idx = df.index.get_loc(date)
+
+        # Need enough history for EMA warm-up, coil window, and volume baseline
+        if idx < max(COIL_CANDLES, EMA_LONG, VOLUME_AVG_PERIOD):
+            continue
+
+        # Price floor — skip penny stocks below MIN_PRICE
+        if float(df["Close"].iloc[idx]) < MIN_PRICE:
+            continue
+
+        # Liquidity gate — reject stocks below ₹10 Cr avg daily turnover
+        if not check_liquidity(df, idx):
+            continue
+
+        trend = check_trend(df, idx)
+        if trend is None:
+            continue
+
+        coil = check_consolidation(df, idx)
+        if coil is None:
+            continue
+
+        vol = check_volume(df, idx)
+        if vol is None:
+            continue
+
+        entry     = coil["period_high"]
+        stop_loss = coil["period_low"]
+        target    = entry + REWARD_RATIO * (entry - stop_loss)
+        sc        = score_breakout(trend, coil)
+
+        # Score gate — skip low-quality setups (set MIN_SCORE_THRESHOLD in settings)
+        if sc["total"] < MIN_SCORE_THRESHOLD:
+            continue
+
+        candidates.append({
+            "ticker":       ticker,
+            "name":         STOCKS.get(ticker, ticker),
+            "df":           df,
+            "idx":          idx,
+            "trend":        trend,
+            "coil":         coil,
+            "entry":        entry,
+            "stop_loss":    stop_loss,
+            "target":       target,
+            "score":        sc["total"],
+            "volume_ratio": vol["surge_ratio"],
+        })
+
+    candidates.sort(key=lambda x: x["score"], reverse=True)
+    return candidates
+
+
+# ── Trade closer (helper) ─────────────────────────────────────────────────────
+
+def _close(
+    trade:         dict,
+    exit_price:    float,
+    outcome:       str,
+    nifty_idx:     int,
+    closed_trades: list,
+) -> float:
+    """
+    Finalise an open trade: apply exit slippage, deduct transaction costs,
+    record outcome, and print log line.
+
+    Execution model
+    ---------------
+      effective_entry  : stored on the trade at open (entry filled higher)
+      effective_exit   : exit_price * (1 − SLIPPAGE_PCT)  (filled lower)
+      cost             : effective_entry × qty × COST_PCT  (brokerage + fees)
+      pnl_abs          : (effective_exit − effective_entry) × qty − cost
+
+    Returns pnl_abs so the caller can update running equity.
+    """
+    eff_entry  = trade["effective_entry"]
+    eff_exit   = round(exit_price * (1 - SLIPPAGE_PCT), 2)
+    qty        = trade["qty"]
+    cost       = round(eff_entry * qty * COST_PCT, 2)
+    pnl_abs    = qty * (eff_exit - eff_entry) - cost
+    pnl_pct    = round(pnl_abs / (eff_entry * qty) * 100, 2) if qty > 0 else 0.0
+    bars_held  = nifty_idx - trade["nifty_entry_idx"]
+
+    trade.update({
+        "exit_price": round(exit_price, 2),
+        "outcome":    outcome,
+        "pnl_abs":    round(pnl_abs, 2),   # cost-adjusted absolute P&L (INR)
+        "pnl_pct":    pnl_pct,
+        "trade_cost": cost,
+        "bars_held":  bars_held,
+    })
+    closed_trades.append(trade)
+
+    icon = {"win": "WIN ", "loss": "LOSS", "breakeven": "BE  ", "trail": "TRL "}.get(
+        outcome, "????")
+    print(
+        f"  {trade['signal_date']:<12} "
+        f"{trade['name']:<20} "
+        f"{trade['score']:>5.1f} "
+        f"vol {trade['volume_ratio']:>4.2f}x "
+        f"Rs.{eff_entry:>7,.0f} "
+        f"Rs.{trade['stop_loss']:>7,.0f} "
+        f"Rs.{trade['target']:>8,.0f} "
+        f"Rs.{eff_exit:>7,.0f} "
+        f"{pnl_pct:>+6.2f}%  {icon}"
+    )
+    return pnl_abs
+
+
+# ── Backtest engine ───────────────────────────────────────────────────────────
+
+def run_backtest(
+    nifty_df:   pd.DataFrame,
+    stock_data: dict[str, pd.DataFrame],
+) -> tuple[list[dict], float]:
+    """
+    Concurrent multi-position backtest.
+
+    STEP A (each day) — Update every open trade:
+      • Apply breakeven rule (High >= entry + 1.5R and Close > entry).
+      • Close on SL hit / target hit / EMA20 trailing stop.
+      • Update equity on close.
+
+    STEP B (each day) — Open new trades if slots are available:
+      • Market must be bullish (Nifty close > EMA50).
+      • Scan all stocks → Trend + Coil + Volume → score.
+      • For each candidate (best score first), confirm entry:
+          next bar must have High >= entry AND Close >= entry.
+      • Size each trade so that a full stop-loss costs RISK_PER_TRADE % equity.
+      • Open up to MAX_CONCURRENT_TRADES simultaneous positions.
+
+    Returns (closed_trades, final_equity).
+    """
+    all_dates = nifty_df.index
+    start_idx = max(EMA_LONG + 10, len(all_dates) - BACKTEST_DAYS)
+    equity    = float(STARTING_EQUITY)
+
+    active_trades: list[dict] = []
+    closed_trades: list[dict] = []
+
+    # Header
+    print(f"\n  Backtest range  : {all_dates[start_idx].date()}  ->  {all_dates[-1].date()}")
+    print(f"  Bars in period  : {len(all_dates) - start_idx}")
+    print(f"  Max concurrent  : {MAX_CONCURRENT_TRADES} trades\n")
+
+    col = (
+        f"{'Date':<12} {'Name':<20} {'Score':>5} {'Vol':>7} "
+        f"{'Entry':>8} {'SL':>8} {'Target':>9} {'Exit':>8} {'PnL%':>6}  Result"
+    )
+    print("  " + col)
+    print("  " + "-" * len(col))
+
+    for i in range(start_idx, len(all_dates)):
+        date = all_dates[i]
+
+        # ── STEP A: Update every open trade ───────────────────────────────────
+        still_open: list[dict] = []
+
+        for trade in active_trades:
+            if i < trade["nifty_entry_idx"]:
+                still_open.append(trade)
+                continue
+
+            df     = trade["df"]
+            entry  = trade["entry_price"]
+            target = trade["target"]
+            risk   = entry - trade["stop_loss"]
+
+            if date not in df.index:
+                still_open.append(trade)
+                continue
+
+            bar      = df.index.get_loc(date)
+            high_bar = float(df["High"].iloc[bar])
+            low_bar  = float(df["Low"].iloc[bar])
+            close_bar = float(df["Close"].iloc[bar])
+
+            # Breakeven: price touched trigger level → raise active stop to entry
+            if (
+                not trade["be_hit"]
+                and high_bar >= entry + risk * 1.5
+                and close_bar > entry
+            ):
+                trade["active_sl"] = entry
+                trade["be_hit"]    = True
+
+            if low_bar <= trade["active_sl"]:
+                outcome = "breakeven" if trade["be_hit"] else "loss"
+                equity += _close(trade, trade["active_sl"], outcome, i, closed_trades)
+
+            elif high_bar >= target:
+                equity += _close(trade, target, "win", i, closed_trades)
+
+            else:
+                ema20 = None
+                if "EMA20" in df.columns:
+                    val = df["EMA20"].iloc[bar]
+                    if not pd.isna(val):
+                        ema20 = float(val)
+
+                if ema20 is not None and close_bar < ema20:
+                    exit_price = float(df["Open"].iloc[bar + 1]) if bar + 1 < len(df) else float(df["Close"].iloc[bar])
+                    equity += _close(trade, exit_price, "trail", i, closed_trades)
+                else:
+                    still_open.append(trade)
+
+        active_trades = still_open
+
+        # ── STEP B: Open new trades if slots are available ────────────────────
+        if i >= len(all_dates) - 1:
+            continue
+
+        regime_ok, regime_label, _breadth = get_market_regime(nifty_df, i, stock_data)
+        if not regime_ok:
+            continue
+
+        # In EARLY_TREND regime apply optional trade-capacity reduction
+        effective_max = MAX_CONCURRENT_TRADES
+        if regime_label == "EARLY_TREND" and EARLY_TREND_MAX_TRADES_FACTOR < 1.0:
+            effective_max = max(1, round(MAX_CONCURRENT_TRADES
+                                         * EARLY_TREND_MAX_TRADES_FACTOR))
+
+        if len(active_trades) >= effective_max:
+            continue
+
+        active_tickers = {t["ticker"] for t in active_trades}
+        candidates     = scan_candidates(stock_data, date)
+        candidates     = [c for c in candidates if c["ticker"] not in active_tickers]
+
+        slots = effective_max - len(active_trades)
+        added = 0
+
+        # Pre-compute sector occupancy for concentration cap
+        active_sector_counts: dict[str, int] = defaultdict(int)
+        for t in active_trades:
+            active_sector_counts[t.get("sector", "OTHER")] += 1
+
+        for cand in candidates:
+            if added >= slots:
+                break
+
+            # Sector concentration cap
+            sector = get_sector(cand["ticker"])
+            if active_sector_counts[sector] >= MAX_TRADES_PER_SECTOR:
+                continue
+
+            next_bar = cand["idx"] + 1
+            if next_bar >= len(cand["df"]):
+                continue
+
+            # Entry confirmation: next bar must close at or above breakout level
+            bar_high  = float(cand["df"]["High"].iloc[next_bar])
+            bar_close = float(cand["df"]["Close"].iloc[next_bar])
+            if bar_high < cand["entry"] or bar_close < cand["entry"]:
+                continue
+
+            entry_price      = round(cand["entry"],     2)
+            stop_loss        = round(cand["stop_loss"], 2)
+            target           = round(cand["target"],    2)
+
+            # Slippage: we fill slightly above the signal price on entry
+            effective_entry  = round(entry_price * (1 + SLIPPAGE_PCT), 2)
+
+            # Risk per share uses the actual fill (effective_entry) vs original SL
+            risk_per_share   = effective_entry - stop_loss
+            if risk_per_share <= 0:
+                continue
+
+            # Size so that a full stop-loss = exactly RISK_PER_TRADE % of equity
+            qty = (equity * RISK_PER_TRADE / 100) / risk_per_share
+
+            # Position size cap — single trade cannot exceed MAX_POSITION_PCT of equity
+            max_qty = (equity * MAX_POSITION_PCT / 100) / effective_entry
+            qty     = min(qty, max_qty)
+            if qty <= 0:
+                continue
+
+            entry_stock_date = cand["df"].index[next_bar]
+            if entry_stock_date in all_dates:
+                nifty_entry_idx = all_dates.get_loc(entry_stock_date)
+            else:
+                nifty_entry_idx = i + 1
+
+            new_trade = {
+                "ticker":          cand["ticker"],
+                "name":            cand["name"],
+                "sector":          sector,
+                "df":              cand["df"],
+                "entry_price":     entry_price,       # signal / trigger level
+                "effective_entry": effective_entry,   # actual fill (used for P&L)
+                "stop_loss":       stop_loss,
+                "target":          target,
+                "active_sl":       stop_loss,
+                "be_hit":          False,
+                "nifty_entry_idx": nifty_entry_idx,
+                "signal_date":     str(date.date()),
+                "qty":             qty,
+                "score":           cand["score"],
+                "volume_ratio":    cand["volume_ratio"],
+            }
+            active_trades.append(new_trade)
+            active_tickers.add(cand["ticker"])
+            active_sector_counts[sector] += 1   # keep concentration tally current
+            added += 1
+
+    # Force-close anything still open at end of data
+    last_i    = len(all_dates) - 1
+    last_date = all_dates[last_i]
+
+    for trade in active_trades:
+        df = trade["df"]
+        if last_date in df.index:
+            last_bar = df.index.get_loc(last_date)
+        else:
+            past = df.index[df.index < last_date]
+            if past.empty:
+                continue
+            last_bar = df.index.get_loc(past[-1])
+
+        exit_price = float(df["Close"].iloc[last_bar])
+        equity    += _close(trade, exit_price, "trail", last_i, closed_trades)
+
+    return closed_trades, equity
+
+
+# ── Analysis helpers ──────────────────────────────────────────────────────────
+
+def _period_stats(ts: list[dict]) -> dict:
+    """Aggregate trade stats for a list of trades (any subset)."""
+    total      = len(ts)
+    wins       = sum(1 for t in ts if t["outcome"] == "win")
+    losses     = sum(1 for t in ts if t["outcome"] == "loss")
+    breakevens = sum(1 for t in ts if t["outcome"] == "breakeven")
+    trails     = sum(1 for t in ts if t["outcome"] == "trail")
+    win_rate   = round(wins / total * 100, 1) if total else 0.0
+    pnl_abs    = sum(t.get("pnl_abs", 0) for t in ts)
+    pnl_pct    = round(pnl_abs / STARTING_EQUITY * 100, 2) if STARTING_EQUITY else 0.0
+    return dict(total=total, wins=wins, losses=losses, breakevens=breakevens,
+                trails=trails, win_rate=win_rate,
+                pnl_abs=round(pnl_abs, 2), pnl_pct=pnl_pct)
+
+
+def print_year_breakdown(trades: list[dict], width: int = 62) -> None:
+    """Print a compact year-by-year performance table + timeout sub-table."""
+    if not trades:
+        return
+
+    by_year: dict[int, list] = defaultdict(list)
+    for t in trades:
+        by_year[int(t["signal_date"][:4])].append(t)
+
+    print()
+    print("=" * width)
+    print(f"{'YEAR-BY-YEAR BREAKDOWN':^{width}}")
+    print("=" * width)
+    hdr = f"  {'Year':<6}  {'Trades':>6}  {'Wins':>4}  {'Win%':>5}  {'Approx Net P&L':>18}"
+    print(hdr)
+    print("  " + "-" * (len(hdr) - 2))
+
+    for year in sorted(by_year):
+        s    = _period_stats(by_year[year])
+        sign = "+" if s["pnl_pct"] >= 0 else ""
+        print(
+            f"  {year:<6}  {s['total']:>6}  {s['wins']:>4}  "
+            f"{s['win_rate']:>4.1f}%  "
+            f"{sign}{s['pnl_pct']:>+6.2f}%  "
+            f"(Rs.{s['pnl_abs']:>+10,.0f})"
+        )
+
+    # ── Timeout sub-table (Part 5 — detect regime shifts) ─────────────────────
+    print()
+    print(f"  {'Trailing exit details by year':^{width - 2}}")
+    to_hdr = f"  {'Year':<6}  {'Trailing':>8}  {'Avg TR%':>8}  {'interpretation':>20}"
+    print(to_hdr)
+    print("  " + "-" * (len(to_hdr) - 2))
+    for year in sorted(by_year):
+        to_trades = [t for t in by_year[year] if t["outcome"] == "trail"]
+        if not to_trades:
+            print(f"  {year:<6}  {'—':>8}  {'—':>8}")
+            continue
+        avg_to = round(sum(t["pnl_pct"] for t in to_trades) / len(to_trades), 2)
+        sign   = "+" if avg_to >= 0 else ""
+        note   = "trending" if avg_to >= 1.0 else ("choppy" if avg_to <= -1.0 else "sideways")
+        print(f"  {year:<6}  {len(to_trades):>8}  {sign}{avg_to:>+7.2f}%  {note:>20}")
+
+    print("=" * width)
+
+
+def print_volume_analysis(trades: list[dict], width: int = 62) -> None:
+    """
+    Compare average entry volume ratio across outcomes.
+
+    A large WIN vs BREAKEVEN gap suggests the volume filter has room to be
+    tightened (raise VOLUME_MIN_RATIO) to improve precision.
+    A small gap means volume alone is not a strong differentiator.
+    """
+    def _avg_vol(outcome: str) -> tuple[float, int]:
+        ts = [t for t in trades if t["outcome"] == outcome]
+        if not ts:
+            return 0.0, 0
+        return round(sum(t.get("volume_ratio", 0) for t in ts) / len(ts), 2), len(ts)
+
+    vol_win,  n_win  = _avg_vol("win")
+    vol_be,   n_be   = _avg_vol("breakeven")
+    vol_loss, n_loss = _avg_vol("loss")
+    vol_to,   n_to   = _avg_vol("trail")
+
+    diff = round(vol_win - vol_be, 2)
+    if   diff > 0.50:
+        interp = "Strong edge  — WIN trades carry noticeably higher volume"
+    elif diff > 0.20:
+        interp = "Modest edge  — volume partially differentiates wins"
+    else:
+        interp = "Weak edge    — volume alone doesn't separate wins from BEs"
+
+    print()
+    print("=" * width)
+    print(f"{'VOLUME ANALYSIS':^{width}}")
+    print("=" * width)
+    hdr = f"  {'Outcome':<16}  {'Avg Vol Ratio':>13}  {'Count':>6}"
+    print(hdr)
+    print("  " + "-" * (len(hdr) - 2))
+    print(f"  {'WIN':<16}  {vol_win:>12.2f}x  {n_win:>6}")
+    print(f"  {'BREAKEVEN':<16}  {vol_be:>12.2f}x  {n_be:>6}")
+    print(f"  {'LOSS':<16}  {vol_loss:>12.2f}x  {n_loss:>6}")
+    print(f"  {'TRAILING':<16}  {vol_to:>12.2f}x  {n_to:>6}")
+    print("  " + "-" * (len(hdr) - 2))
+    sign = "+" if diff >= 0 else ""
+    print(f"  {'WIN vs BE diff':<16}  {sign}{diff:>12.2f}x")
+    print()
+    print(f"  {interp}")
+    print("=" * width)
+
+
+def print_walkforward_summary(trades: list[dict], width: int = 62) -> None:
+    """
+    Split trades into in-sample (before WALK_FORWARD_SPLIT_YEAR) and
+    out-of-sample (from WALK_FORWARD_SPLIT_YEAR onward), then print
+    side-by-side stats to assess strategy robustness.
+
+    Note: P&L shown here sums per-trade pnl_abs as an approximation;
+    compounding effects mean this differs slightly from the main equity curve.
+    """
+    train = [t for t in trades if int(t["signal_date"][:4]) <  WALK_FORWARD_SPLIT_YEAR]
+    test  = [t for t in trades if int(t["signal_date"][:4]) >= WALK_FORWARD_SPLIT_YEAR]
+
+    print()
+    print("=" * width)
+    print(f"{'WALK-FORWARD VALIDATION':^{width}}")
+    print(f"{'(split year: ' + str(WALK_FORWARD_SPLIT_YEAR) + ')':^{width}}")
+    print("=" * width)
+
+    for label, ts in [
+        (f"IN-SAMPLE   (train) — before {WALK_FORWARD_SPLIT_YEAR}", train),
+        (f"OUT-OF-SAMPLE (test) — from {WALK_FORWARD_SPLIT_YEAR} onward", test),
+    ]:
+        print(f"\n  {label}")
+        print("  " + "-" * (width - 2))
+        if not ts:
+            print("    No trades in this period.")
+            continue
+        s    = _period_stats(ts)
+        sign = "+" if s["pnl_pct"] >= 0 else ""
+        print(f"  {'Trades':<28}  {s['total']}")
+        print(f"  {'Wins / Losses':<28}  {s['wins']} / {s['losses']}")
+        print(f"  {'Breakevens / Trailing':<28}  {s['breakevens']} / {s['trails']}")
+        print(f"  {'Win rate':<28}  {s['win_rate']:.1f}%")
+        print(f"  {'Approx net P&L':<28}  {sign}{s['pnl_pct']:.2f}%  (Rs.{s['pnl_abs']:>+,.0f})")
+
+    print()
+    print("=" * width)
+
+
+# ── Summary printer ───────────────────────────────────────────────────────────
+
+def print_summary(trades: list[dict], final_equity: float) -> None:
+    """Print trade statistics, equity summary, and all robustness sections."""
+    width      = 62
+    total      = len(trades)
+    wins       = sum(1 for t in trades if t["outcome"] == "win")
+    losses     = sum(1 for t in trades if t["outcome"] == "loss")
+    breakevens = sum(1 for t in trades if t["outcome"] == "breakeven")
+    trails     = sum(1 for t in trades if t["outcome"] == "trail")
+    win_rate   = round(wins / total * 100, 1) if total else 0.0
+
+    net_pct = round((final_equity - STARTING_EQUITY) / STARTING_EQUITY * 100, 2)
+    net_abs = round(final_equity - STARTING_EQUITY, 2)
+
+    avg_win     = round(sum(t["pnl_pct"] for t in trades if t["outcome"] == "win")       / wins,       2) if wins       else 0.0
+    avg_loss    = round(sum(t["pnl_pct"] for t in trades if t["outcome"] == "loss")      / losses,     2) if losses     else 0.0
+    avg_be      = round(sum(t["pnl_pct"] for t in trades if t["outcome"] == "breakeven") / breakevens, 2) if breakevens else 0.0
+    avg_trail   = round(sum(t["pnl_pct"] for t in trades if t["outcome"] == "trail")  / trails,   2) if trails   else 0.0
+    avg_hold    = round(sum(t["bars_held"] for t in trades) / total, 1) if total else 0.0
+    avg_rr      = round(-avg_win / avg_loss, 2) if avg_loss != 0 else 0.0
+    total_cost  = round(sum(t.get("trade_cost", 0) for t in trades), 2)
+
+    print()
+    print("=" * width)
+    print(f"{'BACKTEST SUMMARY':^{width}}")
+    print("=" * width)
+
+    # ── Configuration ──────────────────────────────────────────────────────────
+    print(f"  {'Strategy':<30}  Trend + Coil breakout")
+    print(f"  {'Market filter':<30}  Nifty close > EMA50")
+    print(f"  {'Coil window':<30}  {COIL_CANDLES} candles  |  range < {MAX_RANGE_PCT}%")
+    print(f"  {'Entry':<30}  period_high (breakout confirmed)")
+    print(f"  {'Stop loss':<30}  period_low")
+    print(f"  {'Target':<30}  entry + {int(REWARD_RATIO)}x risk  (1:{int(REWARD_RATIO)} RR)")
+    print(f"  {'Breakeven rule':<30}  SL -> entry at high >= 1.5R & close > entry")
+    score_note = f">= {MIN_SCORE_THRESHOLD}" if MIN_SCORE_THRESHOLD > 0 else "disabled (0)"
+    print(f"  {'Min score filter':<30}  {score_note}")
+    print(f"  {'Trailing exit':<30}  Close < EMA20 (exit next open)")
+    print(f"  {'Risk per trade':<30}  {RISK_PER_TRADE}% of equity  (per position)")
+    print(f"  {'Max concurrent trades':<30}  {MAX_CONCURRENT_TRADES}")
+    print(f"  {'Sector cap':<30}  max {MAX_TRADES_PER_SECTOR} open trades per sector")
+    print(f"  {'Position cap':<30}  max {MAX_POSITION_PCT}% of equity per trade")
+    print(f"  {'Slippage':<30}  {SLIPPAGE_PCT*100:.2f}% per side")
+    print(f"  {'Transaction cost':<30}  {COST_PCT*100:.2f}% of trade value")
+
+    # ── Trade counts ───────────────────────────────────────────────────────────
+    print("-" * width)
+    print(f"  {'Total trades':<30}  {total}")
+    print(f"  {'Wins  (target hit)':<30}  {wins}")
+    print(f"  {'Losses  (full stop-out)':<30}  {losses}")
+    print(f"  {'Breakevens  (SL -> entry)':<30}  {breakevens}")
+    print(f"  {'Trailing exits  (<EMA20)':<30}  {trails}")
+    print(f"  {'Win rate':<30}  {win_rate}%")
+
+    # ── Per-outcome averages ────────────────────────────────────────────────────
+    print("-" * width)
+    print(f"  {'Avg win':<30}  +{avg_win}%")
+    print(f"  {'Avg loss  (full)':<30}  {avg_loss}%")
+    print(f"  {'Avg breakeven exit':<30}  {avg_be:+.2f}%")
+    print(f"  {'Avg trailing exit':<30}  {avg_trail:+.2f}%")
+    print(f"  {'Realised RR':<30}  1 : {avg_rr}")
+    print(f"  {'Avg hold (bars)':<30}  {avg_hold}")
+
+    # ── Equity ─────────────────────────────────────────────────────────────────
+    print("-" * width)
+    print(f"  {'Starting equity':<30}  Rs. {STARTING_EQUITY:>10,.0f}")
+    print(f"  {'Final equity':<30}  Rs. {final_equity:>10,.0f}")
+    sign = "+" if net_pct >= 0 else ""
+    print(f"  {'Net P&L  (after costs)':<30}  Rs. {net_abs:>+10,.0f}  ({sign}{net_pct}%)")
+    print(f"  {'Total costs paid':<30}  Rs. {total_cost:>10,.0f}")
+    print("=" * width)
+
+    # ── Extended analysis sections ─────────────────────────────────────────────
+    print_year_breakdown(trades, width)
+    print_volume_analysis(trades, width)
+    print_walkforward_summary(trades, width)
+    print()
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+def run_backtest_strategy() -> None:
+    """Run the full breakout backtest pipeline."""
+    width = 62
+    print("=" * width)
+    print(f"{'SWING TRADING BACKTEST  —  FULL STRATEGY':^{width}}")
+    print(f"{'Universe : ' + str(len(STOCKS)) + ' stocks':^{width}}")
+    print(f"{'Coil {c}c  Range<{r}%  NearHi<{nh}%  RR 1:{rr}'.format(c=COIL_CANDLES, r=int(MAX_RANGE_PCT), nh=int(NEAR_HIGH_PCT), rr=int(REWARD_RATIO)):^{width}}")
+    print(f"{'Run date : ' + datetime.today().strftime('%d %b %Y'):^{width}}")
+    print("=" * width)
+
+    print("\n  Fetching data ...\n")
+    all_tickers = [NIFTY_TICKER] + list(STOCKS.keys())
+    raw         = fetch_all(all_tickers)
+
+    if NIFTY_TICKER not in raw:
+        print("\n  ERROR: Could not fetch Nifty data. Aborting.")
+        return
+
+    nifty_df   = add_indicators(raw[NIFTY_TICKER])
+    stock_data = {t: add_indicators(df) for t, df in raw.items() if t != NIFTY_TICKER}
+
+    print(f"\n  {len(stock_data)}/{len(STOCKS)} stocks loaded.\n")
+
+    if not stock_data:
+        print("  No stock data available. Aborting.")
+        return
+
+    print("─" * width)
+    print(f"{'TRADE LOG':^{width}}")
+    print("─" * width)
+
+    trades, final_equity = run_backtest(nifty_df, stock_data)
+
+    if not trades:
+        print("\n  No trades were generated in the backtest period.")
+        print("  Possible reasons:")
+        print("    - Market was bearish (Nifty below EMA50) most of the period.")
+        print("    - No stock formed a coil tight enough to pass the filter.")
+        print("    - Breakout level was never triggered on the next bar.")
+        print()
+        return
+
+    print_summary(trades, final_equity)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="NSE Swing Trade Backtest")
+    parser.add_argument(
+        "--strategy",
+        default="breakout",
+        choices=["breakout"],
+        help="Strategy to backtest (default: breakout)",
+    )
+    args = parser.parse_args()
+
+    # Strategy dispatch — add new strategies here as elif branches
+    if args.strategy == "breakout":
+        run_backtest_strategy()
+    else:
+        print(f"Unknown strategy: {args.strategy}")
+        raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    main()
