@@ -9,7 +9,7 @@ Coverage  (approximate Nifty 500 composition):
 
 Tickers use Yahoo Finance NSE format  (suffix ".NS").
 Stocks with very low volume or questionable data quality are excluded.
-The liquidity filter in strategies/breakout.py provides a further
+The liquidity filter in strategies/long_breakout.py provides a further
 run-time check (₹5 Cr minimum daily turnover) on top of this list.
 """
 

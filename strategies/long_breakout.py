@@ -1,5 +1,5 @@
 """
-strategies/breakout.py — Coil-breakout strategy: single source of truth.
+strategies/long_breakout.py — Coil-breakout strategy: single source of truth.
 =========================================================================
 ALL signal, filter, and scoring logic lives here.
 Both the live screener and the backtest import from this module.
@@ -361,7 +361,7 @@ def _trend_score(ema50_gap_pct: float) -> float:
         return max(0.0, 12.5 - ((ema50_gap_pct - 6.0) / 6.0) * 12.5)
 
 
-def score_breakout(trend: TrendResult, coil: ConsolidationResult) -> ScoreResult:
+def score_long_breakout(trend: TrendResult, coil: ConsolidationResult) -> ScoreResult:
     """
     Composite score 0–100 for a breakout candidate.
 

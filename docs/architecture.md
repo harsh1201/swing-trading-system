@@ -25,7 +25,7 @@ The system is built as a set of modular Python scripts and configuration files, 
 -   **Features**: Supporting concurrent positions, risk-based position sizing, and sector caps.
 -   **Metrics**: Win rate, profit/loss (PnL), realized risk/reward (RR), and walk-forward validation.
 
-### 3. **Strategy Engine (`strategies/breakout.py`)**
+### 3. **Strategy Engine (`strategies/long_breakout.py`)**
 -   **Purpose**: Single source of truth for strategy logic.
 -   **Logic**: Contains the math for EMA crossovers, consolidation detection, volume surges, and scoring algorithms.
 
@@ -45,7 +45,7 @@ graph TD
     C --> E[backtest.py]
     F[config/stocks.py] --> D
     F --> E
-    G[strategies/breakout.py] --> D
+    G[strategies/long_breakout.py] --> D
     G --> E
     H[config/settings.py] --> D
     H --> E

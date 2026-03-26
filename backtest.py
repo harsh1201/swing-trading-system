@@ -2,7 +2,7 @@
 backtest.py — Full-Strategy Swing Trading Backtest  (concurrent positions)
 ===========================================================================
 Mirrors the live screener exactly — all strategy logic is imported from
-strategies/breakout.py (single source of truth).
+strategies/long_breakout.py (single source of truth).
 
 Pipeline (each day)
 -------------------
@@ -27,8 +27,8 @@ Concurrent positions
 
 Usage
 -----
-  python backtest.py                        # default (breakout) strategy
-  python backtest.py --strategy breakout    # explicit strategy name
+  python backtest.py                         # default (long_breakout) strategy
+  python backtest.py --strategy long_breakout # explicit strategy name
 """
 
 import sys
@@ -68,7 +68,7 @@ from config.settings import (
     MIN_PRICE,
     EARLY_TREND_MAX_TRADES_FACTOR,
 )
-from strategies.breakout import (
+from strategies.long_breakout import (
     TrendResult,
     ConsolidationResult,
     add_indicators,
@@ -77,7 +77,7 @@ from strategies.breakout import (
     check_consolidation,
     check_volume,
     check_liquidity,
-    score_breakout,
+    score_long_breakout,
 )
 
 
@@ -147,7 +147,7 @@ def get_sector(ticker: str) -> str:
 def fetch_ticker(
     ticker:  str,
     days:    int  = BACKTEST_FETCH_DAYS,
-    refresh: bool = True,
+    refresh: bool = False,
 ) -> pd.DataFrame | None:
     """
     Return daily OHLCV for one ticker.  Delegates to data.cache so repeated
@@ -181,7 +181,7 @@ def scan_candidates(
     Return all stocks passing Liquidity + Trend + Coil + Volume filters for
     `date`, each carrying its score and trade levels.  Sorted best-first.
 
-    All filter logic delegates to strategies/breakout.py — no duplication.
+    All filter logic delegates to strategies/long_breakout.py — no duplication.
     """
     candidates: list[Candidate] = []
 
@@ -217,7 +217,7 @@ def scan_candidates(
         entry     = coil["period_high"]
         stop_loss = coil["period_low"]
         target    = entry + REWARD_RATIO * (entry - stop_loss)
-        sc        = score_breakout(trend, coil)
+        sc        = score_long_breakout(trend, coil)
 
         # Score gate — skip low-quality setups (set MIN_SCORE_THRESHOLD in settings)
         if sc["total"] < MIN_SCORE_THRESHOLD:
@@ -790,14 +790,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="NSE Swing Trade Backtest")
     parser.add_argument(
         "--strategy",
-        default="breakout",
-        choices=["breakout"],
-        help="Strategy to backtest (default: breakout)",
+        default="long_breakout",
+        choices=["long_breakout"],
+        help="Strategy to backtest (default: long_breakout)",
     )
     args = parser.parse_args()
 
     # Strategy dispatch — add new strategies here as elif branches
-    if args.strategy == "breakout":
+    if args.strategy == "long_breakout":
         run_backtest_strategy()
     else:
         print(f"Unknown strategy: {args.strategy}")

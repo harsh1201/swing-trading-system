@@ -2,13 +2,13 @@
 screener.py — Live swing-trade screener for Indian NSE stocks.
 ==============================================================
 Scans the full universe defined in config/stocks.py, applies the
-multi-stage breakout filter from strategies/breakout.py, scores every
+multi-stage breakout filter from strategies/long_breakout.py, scores every
 valid setup, and prints ranked trade cards for the best opportunities.
 
 Usage
 -----
-  python screener.py                       # run with default (breakout) strategy
-  python screener.py --strategy breakout   # explicit strategy name
+  python screener.py                       # run with default (long_breakout) strategy
+  python screener.py --strategy long_breakout   # explicit strategy name
 
 Modes (set LIVE_MODE in config/settings.py)
 -------------------------------------------
@@ -61,7 +61,7 @@ from config.settings import (
     MIN_AVG_TURNOVER,
     MIN_PRICE,
 )
-from strategies.breakout import (
+from strategies.long_breakout import (
     TrendResult,
     ConsolidationResult,
     TradeSetupResult,
@@ -75,7 +75,7 @@ from strategies.breakout import (
     check_volume,
     check_liquidity,
     check_gap_up,
-    score_breakout,
+    score_long_breakout,
     calculate_trade_setup,
 )
 
@@ -538,7 +538,7 @@ def run_screener() -> None:
                 print("skipped — earnings nearby")
             continue
 
-        score = score_breakout(trend, coil)
+        score = score_long_breakout(trend, coil)
 
         if not LIVE_MODE:
             print(f"SETUP FOUND  |  score {score['total']:.1f}/100  "
@@ -620,13 +620,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="NSE Swing Trade Screener")
     parser.add_argument(
         "--strategy",
-        default="breakout",
-        choices=["breakout"],
-        help="Strategy to run (default: breakout)",
+        default="long_breakout",
+        choices=["long_breakout"],
+        help="Strategy to run (default: long_breakout)",
     )
     args = parser.parse_args()
 
-    if args.strategy == "breakout":
+    if args.strategy == "long_breakout":
         run_screener()
     else:
         print(f"Unknown strategy: {args.strategy}")

@@ -30,7 +30,7 @@ The system is modular and designed for easy extension:
 
 1.  **`screener.py`**: Daily live execution tool.
 2.  **`backtest.py`**: Strategy research and verification.
-3.  **`strategies/breakout.py`**: Core strategy logic (the "Brain").
+3.  **`strategies/long_breakout.py`**: Core strategy logic (the "Brain").
 4.  **`config/settings.py`**: User-defined risk and system parameters.
 
 👉 See the full [Architecture Documentation](docs/architecture.md) for more details.
