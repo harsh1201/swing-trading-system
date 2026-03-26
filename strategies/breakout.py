@@ -21,6 +21,8 @@ Strategy summary
 
 from __future__ import annotations
 
+from typing import TypedDict
+
 import pandas as pd
 
 from config.settings import (
@@ -41,6 +43,51 @@ from config.settings import (
 )
 
 
+# ── Type definitions ─────────────────────────────────────────────────────────
+
+class TrendResult(TypedDict):
+    close: float
+    ema50: float
+    ema200: float
+
+
+class ConsolidationResult(TypedDict):
+    period_high: float
+    period_low: float
+    range_pct: float
+    gap_to_high_pct: float
+
+
+class VolumeResult(TypedDict):
+    latest_volume: int
+    avg_volume: int
+    surge_ratio: float
+
+
+class GapUpResult(TypedDict):
+    today_open: float
+    gap_pct: float
+    is_gap_up: bool
+
+
+class ScoreResult(TypedDict):
+    total: float
+    risk_score: float
+    range_score: float
+    trend_score: float
+    ema50_gap_pct: float
+
+
+class TradeSetupResult(TypedDict):
+    entry: float
+    stop_loss: float
+    target: float
+    risk: float
+    risk_pct: float
+    rr_ratio: float
+    is_valid: bool
+
+
 # ── Indicator helpers ─────────────────────────────────────────────────────────
 
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -57,7 +104,7 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 # ── Market regime ─────────────────────────────────────────────────────────────
 
-def get_market_regime(df: pd.DataFrame, idx: int = -1, all_data: dict = None) -> tuple[bool, str, float]:
+def get_market_regime(df: pd.DataFrame, idx: int = -1, all_data: dict[str, pd.DataFrame] | None = None) -> tuple[bool, str, float]:
     """
     Three-tier market regime detector using EMA20, EMA50, and market breadth.
 
@@ -123,7 +170,7 @@ def is_market_bullish(nifty_df: pd.DataFrame, idx: int = -1) -> bool:
 
 # ── Stage 1: Trend ────────────────────────────────────────────────────────────
 
-def check_trend(df: pd.DataFrame, idx: int = -1) -> dict | None:
+def check_trend(df: pd.DataFrame, idx: int = -1) -> TrendResult | None:
     """
     Evaluate the trend at bar `idx` (default: latest bar).
 
@@ -139,15 +186,15 @@ def check_trend(df: pd.DataFrame, idx: int = -1) -> dict | None:
     if not (close > ema50 > ema200):
         return None
     return {
-        "close": round(close,  2),
-        "ema50": round(ema50,  2),
-        "ema200":round(ema200, 2),
+        "close": round(float(close),  2),
+        "ema50": round(float(ema50),  2),
+        "ema200":round(float(ema200), 2),
     }
 
 
 # ── Stage 2: Coil / Consolidation ─────────────────────────────────────────────
 
-def check_consolidation(df: pd.DataFrame, idx: int = -1) -> dict | None:
+def check_consolidation(df: pd.DataFrame, idx: int = -1) -> ConsolidationResult | None:
     """
     Evaluate the last COIL_CANDLES bars ending at `idx` for a tight coil.
 
@@ -178,16 +225,16 @@ def check_consolidation(df: pd.DataFrame, idx: int = -1) -> dict | None:
         return None
 
     return {
-        "period_high":   round(period_high,  2),
-        "period_low":    round(period_low,   2),
-        "range_pct":     round(range_pct,    2),
-        "gap_to_high_pct": round(gap_to_high, 2),
+        "period_high":   round(float(period_high),  2),
+        "period_low":    round(float(period_low),   2),
+        "range_pct":     round(float(range_pct),    2),
+        "gap_to_high_pct": round(float(gap_to_high), 2),
     }
 
 
 # ── Stage 3: Volume ───────────────────────────────────────────────────────────
 
-def check_volume(df: pd.DataFrame, idx: int = -1) -> dict | None:
+def check_volume(df: pd.DataFrame, idx: int = -1) -> VolumeResult | None:
     """
     Compare the bar at `idx` against the rolling volume baseline.
 
@@ -210,7 +257,7 @@ def check_volume(df: pd.DataFrame, idx: int = -1) -> dict | None:
     baseline       = df["Volume"].iloc[idx - VOLUME_AVG_PERIOD : idx]
     avg_volume     = float(baseline.mean())
     latest_volume  = float(df["Volume"].iloc[idx])
-    surge_ratio    = round(latest_volume / avg_volume, 2) if avg_volume > 0 else 0.0
+    surge_ratio    = round(float(latest_volume / avg_volume), 2) if avg_volume > 0 else 0.0
 
     if surge_ratio < VOLUME_MIN_RATIO:
         return None
@@ -228,7 +275,7 @@ def check_gap_up(
     df: pd.DataFrame,
     entry_price: float,
     threshold: float = GAP_UP_THRESHOLD,
-) -> dict:
+) -> GapUpResult:
     """
     Detect whether today's open has already gapped above the entry level.
 
@@ -236,7 +283,7 @@ def check_gap_up(
     Always returns a dict (never None); caller decides how to act on is_gap_up.
     """
     today_open = round(float(df["Open"].iloc[-1]), 2)
-    gap_pct    = round((today_open - entry_price) / entry_price * 100, 2)
+    gap_pct    = round(float((today_open - entry_price) / entry_price * 100), 2)
     return {
         "today_open": today_open,
         "gap_pct":    gap_pct,
@@ -314,7 +361,7 @@ def _trend_score(ema50_gap_pct: float) -> float:
         return max(0.0, 12.5 - ((ema50_gap_pct - 6.0) / 6.0) * 12.5)
 
 
-def score_breakout(trend: dict, coil: dict) -> dict:
+def score_breakout(trend: TrendResult, coil: ConsolidationResult) -> ScoreResult:
     """
     Composite score 0–100 for a breakout candidate.
 
@@ -334,14 +381,14 @@ def score_breakout(trend: dict, coil: dict) -> dict:
     ema50_gap_pct = (trend["close"] - trend["ema50"]) / trend["ema50"] * 100
     trend_sc      = _trend_score(ema50_gap_pct)
 
-    total = round(risk_score + range_score + trend_sc, 1)
+    total = round(float(risk_score + range_score + trend_sc), 1)
 
     return {
         "total":         total,
-        "risk_score":    round(risk_score,    1),
-        "range_score":   round(range_score,   1),
-        "trend_score":   round(trend_sc,      1),
-        "ema50_gap_pct": round(ema50_gap_pct, 2),
+        "risk_score":    round(float(risk_score),    1),
+        "range_score":   round(float(range_score),   1),
+        "trend_score":   round(float(trend_sc),      1),
+        "ema50_gap_pct": round(float(ema50_gap_pct), 2),
     }
 
 
@@ -352,7 +399,7 @@ def calculate_trade_setup(
     period_low:   float,
     reward_ratio: float = REWARD_RATIO,
     max_risk_pct: float = MAX_RISK_PCT,
-) -> dict:
+) -> TradeSetupResult:
     """
     Build the complete breakout trade plan from the coil range.
 
@@ -365,11 +412,11 @@ def calculate_trade_setup(
     Returns {"entry", "stop_loss", "target", "risk", "risk_pct", "rr_ratio", "is_valid"}.
     is_valid is True only if risk_pct <= max_risk_pct.
     """
-    entry     = round(period_high, 2)
-    stop_loss = round(period_low,  2)
-    risk      = round(entry - stop_loss, 2)
-    target    = round(entry + reward_ratio * risk, 2)
-    risk_pct  = round(risk / entry * 100, 2)
+    entry     = round(float(period_high), 2)
+    stop_loss = round(float(period_low),  2)
+    risk      = round(float(entry - stop_loss), 2)
+    target    = round(float(entry + reward_ratio * risk), 2)
+    risk_pct  = round(float(risk / entry * 100), 2)
 
     return {
         "entry":      entry,
@@ -384,7 +431,7 @@ def calculate_trade_setup(
 
 # ── Market breadth ────────────────────────────────────────────────────────────
 
-def calculate_market_breadth(all_data, idx, reference_df):
+def calculate_market_breadth(all_data: dict[str, pd.DataFrame], idx: int, reference_df: pd.DataFrame) -> float:
     total = 0
     above = 0
 

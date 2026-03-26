@@ -29,6 +29,8 @@ Pipeline
 
 import sys
 import argparse
+from typing import TypedDict
+
 import pandas as pd
 from datetime import datetime, timedelta
 from data.cache    import fetch_ohlcv
@@ -60,6 +62,12 @@ from config.settings import (
     MIN_PRICE,
 )
 from strategies.breakout import (
+    TrendResult,
+    ConsolidationResult,
+    TradeSetupResult,
+    VolumeResult,
+    GapUpResult,
+    ScoreResult,
     add_indicators,
     get_market_regime,
     check_trend,
@@ -70,6 +78,28 @@ from strategies.breakout import (
     score_breakout,
     calculate_trade_setup,
 )
+
+
+# ── Type definitions ─────────────────────────────────────────────────────────
+
+class MarketRegimeInfo(TypedDict):
+    close: float | None
+    ema20: float | None
+    ema50: float | None
+    is_bullish: bool
+    regime: str
+    error: str | None
+
+
+class ScreenerSetup(TypedDict):
+    name: str
+    ticker: str
+    trend: TrendResult
+    cons: ConsolidationResult
+    setup: TradeSetupResult
+    vol: VolumeResult
+    gap: GapUpResult
+    score: ScoreResult
 
 
 # ── Data helper ───────────────────────────────────────────────────────────────
@@ -89,7 +119,7 @@ def fetch_data(
 
 # ── Market regime (screener-specific: fetches its own Nifty data) ─────────────
 
-def check_market_regime(ticker: str = NIFTY_TICKER) -> dict:
+def check_market_regime(ticker: str = NIFTY_TICKER) -> MarketRegimeInfo:
     """
     Fetch Nifty data, compute EMA20/EMA50, and return full regime details.
 
@@ -130,7 +160,7 @@ def check_market_regime(ticker: str = NIFTY_TICKER) -> dict:
 
 # ── Earnings blackout helper ───────────────────────────────────────────────────
 
-def is_near_earnings(earnings_dates: list, today: datetime) -> bool:
+def is_near_earnings(earnings_dates: list[datetime], today: datetime) -> bool:
     """
     Return True if any earnings date falls within the blackout window:
       [today − EARNINGS_LOOKBACK_DAYS, today + EARNINGS_LOOKAHEAD_DAYS]
@@ -151,7 +181,7 @@ def _rank_label(rank: int) -> str:
 
 
 def _score_bar(score: float, width: int = 20) -> str:
-    filled = round(score / 100 * width)
+    filled = round(float(score / 100 * width))
     return "[" + "#" * filled + "-" * (width - filled) + f"]  {score:.1f}/100"
 
 
@@ -159,16 +189,16 @@ def print_trade_card(
     rank:   int,
     name:   str,
     ticker: str,
-    trend:  dict,
-    cons:   dict,
-    setup:  dict,
-    vol:    dict,
-    gap:    dict,
-    score:  dict,
+    trend:  TrendResult,
+    cons:   ConsolidationResult,
+    setup:  TradeSetupResult,
+    vol:    VolumeResult,
+    gap:    GapUpResult,
+    score:  ScoreResult,
     width:  int,
 ) -> None:
     """Print a full ranked trade-setup card for one stock (analysis mode)."""
-    upside_pct  = round((setup["target"] - setup["entry"]) / setup["entry"] * 100, 2)
+    upside_pct  = round(float((setup["target"] - setup["entry"]) / setup["entry"] * 100), 2)
     label       = _rank_label(rank)
     vol_tag     = "Volume OK ✅" if vol["surge_ratio"] >= VOLUME_MIN_RATIO else "Weak Volume ⚠️"
 
@@ -240,9 +270,9 @@ def print_trade_card_compact(
     rank:   int,
     name:   str,
     ticker: str,
-    setup:  dict,
-    score:  dict,
-    vol:    dict,
+    setup:  TradeSetupResult,
+    score:  ScoreResult,
+    vol:    VolumeResult,
     width:  int,
 ) -> None:
     """
@@ -250,7 +280,7 @@ def print_trade_card_compact(
     Contains only the fields a trader needs at execution time.
     """
     label     = _rank_label(rank)
-    upside    = round((setup["target"] - setup["entry"]) / setup["entry"] * 100, 2)
+    upside    = round(float((setup["target"] - setup["entry"]) / setup["entry"] * 100), 2)
 
     print("─" * width)
     print(f"  {label}  —  {name}  ({ticker})")
@@ -266,7 +296,7 @@ def print_trade_card_compact(
 
 
 def print_execution_summary(
-    setups:       list[dict],
+    setups:       list[ScreenerSetup],
     market_ok:    bool,
     regime_label: str = "STRONG_BULL",
     width:        int  = 72,
@@ -350,7 +380,7 @@ def run_screener() -> None:
     today   = datetime.today()
     scanned = skipped = earnings_skipped = 0
     ema_passed = coil_passed = risk_passed = vol_passed = 0
-    final_setups: list[dict] = []
+    final_setups: list[ScreenerSetup] = []
 
     # ── Header ────────────────────────────────────────────────────────────────
     print("=" * width)
@@ -389,9 +419,12 @@ def run_screener() -> None:
         }
         r_icon, r_text = _regime_map.get(regime["regime"], ("❓", regime["regime"]))
 
-        gap50     = round((regime["close"] - regime["ema50"]) / regime["ema50"] * 100, 2)
+        assert regime["close"] is not None
+        assert regime["ema20"] is not None
+        assert regime["ema50"] is not None
+        gap50     = round(float((regime["close"] - regime["ema50"]) / regime["ema50"] * 100), 2)
         gap50_sign = "+" if gap50 >= 0 else ""
-        gap20      = round((regime["close"] - regime["ema20"]) / regime["ema20"] * 100, 2)
+        gap20      = round(float((regime["close"] - regime["ema20"]) / regime["ema20"] * 100), 2)
         gap20_sign = "+" if gap20 >= 0 else ""
 
         print(f"  {'Nifty Close':<22}  {regime['close']:>10,.2f}")

@@ -34,6 +34,8 @@ Usage
 import sys
 import argparse
 from collections import defaultdict
+from typing import TypedDict
+
 import pandas as pd
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -67,6 +69,8 @@ from config.settings import (
     EARLY_TREND_MAX_TRADES_FACTOR,
 )
 from strategies.breakout import (
+    TrendResult,
+    ConsolidationResult,
     add_indicators,
     get_market_regime,
     check_trend,
@@ -75,6 +79,60 @@ from strategies.breakout import (
     check_liquidity,
     score_breakout,
 )
+
+
+# ── Type definitions ─────────────────────────────────────────────────────────
+
+class Candidate(TypedDict):
+    ticker: str
+    name: str
+    df: pd.DataFrame
+    idx: int
+    trend: TrendResult
+    coil: ConsolidationResult
+    entry: float
+    stop_loss: float
+    target: float
+    score: float
+    volume_ratio: float
+
+
+class _TradeBase(TypedDict):
+    ticker: str
+    name: str
+    sector: str
+    df: pd.DataFrame
+    entry_price: float
+    effective_entry: float
+    stop_loss: float
+    target: float
+    active_sl: float
+    be_hit: bool
+    nifty_entry_idx: int
+    signal_date: str
+    qty: float
+    score: float
+    volume_ratio: float
+
+
+class Trade(_TradeBase, total=False):
+    exit_price: float
+    outcome: str
+    pnl_abs: float
+    pnl_pct: float
+    trade_cost: float
+    bars_held: int
+
+
+class PeriodStats(TypedDict):
+    total: int
+    wins: int
+    losses: int
+    breakevens: int
+    trails: int
+    win_rate: float
+    pnl_abs: float
+    pnl_pct: float
 
 
 # ── Sector helper ─────────────────────────────────────────────────────────────
@@ -89,7 +147,7 @@ def get_sector(ticker: str) -> str:
 def fetch_ticker(
     ticker:  str,
     days:    int  = BACKTEST_FETCH_DAYS,
-    refresh: bool = False,
+    refresh: bool = True,
 ) -> pd.DataFrame | None:
     """
     Return daily OHLCV for one ticker.  Delegates to data.cache so repeated
@@ -118,14 +176,14 @@ def fetch_all(tickers: list[str]) -> dict[str, pd.DataFrame]:
 def scan_candidates(
     stock_data: dict[str, pd.DataFrame],
     date: pd.Timestamp,
-) -> list[dict]:
+) -> list[Candidate]:
     """
     Return all stocks passing Liquidity + Trend + Coil + Volume filters for
     `date`, each carrying its score and trade levels.  Sorted best-first.
 
     All filter logic delegates to strategies/breakout.py — no duplication.
     """
-    candidates = []
+    candidates: list[Candidate] = []
 
     for ticker, df in stock_data.items():
         if date not in df.index:
@@ -186,11 +244,11 @@ def scan_candidates(
 # ── Trade closer (helper) ─────────────────────────────────────────────────────
 
 def _close(
-    trade:         dict,
+    trade:         Trade,
     exit_price:    float,
     outcome:       str,
     nifty_idx:     int,
-    closed_trades: list,
+    closed_trades: list[Trade],
 ) -> float:
     """
     Finalise an open trade: apply exit slippage, deduct transaction costs,
@@ -206,21 +264,19 @@ def _close(
     Returns pnl_abs so the caller can update running equity.
     """
     eff_entry  = trade["effective_entry"]
-    eff_exit   = round(exit_price * (1 - SLIPPAGE_PCT), 2)
+    eff_exit   = round(float(exit_price * (1 - SLIPPAGE_PCT)), 2)
     qty        = trade["qty"]
-    cost       = round(eff_entry * qty * COST_PCT, 2)
+    cost       = round(float(eff_entry * qty * COST_PCT), 2)
     pnl_abs    = qty * (eff_exit - eff_entry) - cost
-    pnl_pct    = round(pnl_abs / (eff_entry * qty) * 100, 2) if qty > 0 else 0.0
+    pnl_pct    = round(float(pnl_abs / (eff_entry * qty) * 100), 2) if qty > 0 else 0.0
     bars_held  = nifty_idx - trade["nifty_entry_idx"]
 
-    trade.update({
-        "exit_price": round(exit_price, 2),
-        "outcome":    outcome,
-        "pnl_abs":    round(pnl_abs, 2),   # cost-adjusted absolute P&L (INR)
-        "pnl_pct":    pnl_pct,
-        "trade_cost": cost,
-        "bars_held":  bars_held,
-    })
+    trade["exit_price"] = round(float(exit_price), 2)
+    trade["outcome"]    = outcome
+    trade["pnl_abs"]    = round(float(pnl_abs), 2)   # cost-adjusted absolute P&L (INR)
+    trade["pnl_pct"]    = pnl_pct
+    trade["trade_cost"] = cost
+    trade["bars_held"]  = bars_held
     closed_trades.append(trade)
 
     icon = {"win": "WIN ", "loss": "LOSS", "breakeven": "BE  ", "trail": "TRL "}.get(
@@ -236,7 +292,7 @@ def _close(
         f"Rs.{eff_exit:>7,.0f} "
         f"{pnl_pct:>+6.2f}%  {icon}"
     )
-    return pnl_abs
+    return float(pnl_abs)
 
 
 # ── Backtest engine ───────────────────────────────────────────────────────────
@@ -244,7 +300,7 @@ def _close(
 def run_backtest(
     nifty_df:   pd.DataFrame,
     stock_data: dict[str, pd.DataFrame],
-) -> tuple[list[dict], float]:
+) -> tuple[list[Trade], float]:
     """
     Concurrent multi-position backtest.
 
@@ -267,8 +323,8 @@ def run_backtest(
     start_idx = max(EMA_LONG + 10, len(all_dates) - BACKTEST_DAYS)
     equity    = float(STARTING_EQUITY)
 
-    active_trades: list[dict] = []
-    closed_trades: list[dict] = []
+    active_trades: list[Trade] = []
+    closed_trades: list[Trade] = []
 
     # Header
     print(f"\n  Backtest range  : {all_dates[start_idx].date()}  ->  {all_dates[-1].date()}")
@@ -286,7 +342,7 @@ def run_backtest(
         date = all_dates[i]
 
         # ── STEP A: Update every open trade ───────────────────────────────────
-        still_open: list[dict] = []
+        still_open: list[Trade] = []
 
         for trade in active_trades:
             if i < trade["nifty_entry_idx"]:
@@ -349,8 +405,8 @@ def run_backtest(
         # In EARLY_TREND regime apply optional trade-capacity reduction
         effective_max = MAX_CONCURRENT_TRADES
         if regime_label == "EARLY_TREND" and EARLY_TREND_MAX_TRADES_FACTOR < 1.0:
-            effective_max = max(1, round(MAX_CONCURRENT_TRADES
-                                         * EARLY_TREND_MAX_TRADES_FACTOR))
+            effective_max = max(1, round(float(MAX_CONCURRENT_TRADES
+                                         * EARLY_TREND_MAX_TRADES_FACTOR)))
 
         if len(active_trades) >= effective_max:
             continue
@@ -386,12 +442,12 @@ def run_backtest(
             if bar_high < cand["entry"] or bar_close < cand["entry"]:
                 continue
 
-            entry_price      = round(cand["entry"],     2)
-            stop_loss        = round(cand["stop_loss"], 2)
-            target           = round(cand["target"],    2)
+            entry_price      = round(float(cand["entry"]),     2)
+            stop_loss        = round(float(cand["stop_loss"]), 2)
+            target           = round(float(cand["target"]),    2)
 
             # Slippage: we fill slightly above the signal price on entry
-            effective_entry  = round(entry_price * (1 + SLIPPAGE_PCT), 2)
+            effective_entry  = round(float(entry_price * (1 + SLIPPAGE_PCT)), 2)
 
             # Risk per share uses the actual fill (effective_entry) vs original SL
             risk_per_share   = effective_entry - stop_loss
@@ -413,7 +469,7 @@ def run_backtest(
             else:
                 nifty_entry_idx = i + 1
 
-            new_trade = {
+            new_trade: Trade = {
                 "ticker":          cand["ticker"],
                 "name":            cand["name"],
                 "sector":          sector,
@@ -457,27 +513,27 @@ def run_backtest(
 
 # ── Analysis helpers ──────────────────────────────────────────────────────────
 
-def _period_stats(ts: list[dict]) -> dict:
+def _period_stats(ts: list[Trade]) -> PeriodStats:
     """Aggregate trade stats for a list of trades (any subset)."""
     total      = len(ts)
     wins       = sum(1 for t in ts if t["outcome"] == "win")
     losses     = sum(1 for t in ts if t["outcome"] == "loss")
     breakevens = sum(1 for t in ts if t["outcome"] == "breakeven")
     trails     = sum(1 for t in ts if t["outcome"] == "trail")
-    win_rate   = round(wins / total * 100, 1) if total else 0.0
+    win_rate   = round(float(wins / total * 100), 1) if total else 0.0
     pnl_abs    = sum(t.get("pnl_abs", 0) for t in ts)
-    pnl_pct    = round(pnl_abs / STARTING_EQUITY * 100, 2) if STARTING_EQUITY else 0.0
-    return dict(total=total, wins=wins, losses=losses, breakevens=breakevens,
-                trails=trails, win_rate=win_rate,
-                pnl_abs=round(pnl_abs, 2), pnl_pct=pnl_pct)
+    pnl_pct    = round(float(pnl_abs / STARTING_EQUITY * 100), 2) if STARTING_EQUITY else 0.0
+    return {"total": total, "wins": wins, "losses": losses, "breakevens": breakevens,
+            "trails": trails, "win_rate": win_rate,
+            "pnl_abs": round(float(pnl_abs), 2), "pnl_pct": pnl_pct}
 
 
-def print_year_breakdown(trades: list[dict], width: int = 62) -> None:
+def print_year_breakdown(trades: list[Trade], width: int = 62) -> None:
     """Print a compact year-by-year performance table + timeout sub-table."""
     if not trades:
         return
 
-    by_year: dict[int, list] = defaultdict(list)
+    by_year: dict[int, list[Trade]] = defaultdict(list)
     for t in trades:
         by_year[int(t["signal_date"][:4])].append(t)
 
@@ -510,7 +566,7 @@ def print_year_breakdown(trades: list[dict], width: int = 62) -> None:
         if not to_trades:
             print(f"  {year:<6}  {'—':>8}  {'—':>8}")
             continue
-        avg_to = round(sum(t["pnl_pct"] for t in to_trades) / len(to_trades), 2)
+        avg_to = round(float(sum(t["pnl_pct"] for t in to_trades) / len(to_trades)), 2)
         sign   = "+" if avg_to >= 0 else ""
         note   = "trending" if avg_to >= 1.0 else ("choppy" if avg_to <= -1.0 else "sideways")
         print(f"  {year:<6}  {len(to_trades):>8}  {sign}{avg_to:>+7.2f}%  {note:>20}")
@@ -518,7 +574,7 @@ def print_year_breakdown(trades: list[dict], width: int = 62) -> None:
     print("=" * width)
 
 
-def print_volume_analysis(trades: list[dict], width: int = 62) -> None:
+def print_volume_analysis(trades: list[Trade], width: int = 62) -> None:
     """
     Compare average entry volume ratio across outcomes.
 
@@ -530,14 +586,14 @@ def print_volume_analysis(trades: list[dict], width: int = 62) -> None:
         ts = [t for t in trades if t["outcome"] == outcome]
         if not ts:
             return 0.0, 0
-        return round(sum(t.get("volume_ratio", 0) for t in ts) / len(ts), 2), len(ts)
+        return round(float(sum(t.get("volume_ratio", 0) for t in ts) / len(ts)), 2), len(ts)
 
     vol_win,  n_win  = _avg_vol("win")
     vol_be,   n_be   = _avg_vol("breakeven")
     vol_loss, n_loss = _avg_vol("loss")
     vol_to,   n_to   = _avg_vol("trail")
 
-    diff = round(vol_win - vol_be, 2)
+    diff = round(float(vol_win - vol_be), 2)
     if   diff > 0.50:
         interp = "Strong edge  — WIN trades carry noticeably higher volume"
     elif diff > 0.20:
@@ -564,7 +620,7 @@ def print_volume_analysis(trades: list[dict], width: int = 62) -> None:
     print("=" * width)
 
 
-def print_walkforward_summary(trades: list[dict], width: int = 62) -> None:
+def print_walkforward_summary(trades: list[Trade], width: int = 62) -> None:
     """
     Split trades into in-sample (before WALK_FORWARD_SPLIT_YEAR) and
     out-of-sample (from WALK_FORWARD_SPLIT_YEAR onward), then print
@@ -605,7 +661,7 @@ def print_walkforward_summary(trades: list[dict], width: int = 62) -> None:
 
 # ── Summary printer ───────────────────────────────────────────────────────────
 
-def print_summary(trades: list[dict], final_equity: float) -> None:
+def print_summary(trades: list[Trade], final_equity: float) -> None:
     """Print trade statistics, equity summary, and all robustness sections."""
     width      = 62
     total      = len(trades)
@@ -613,18 +669,18 @@ def print_summary(trades: list[dict], final_equity: float) -> None:
     losses     = sum(1 for t in trades if t["outcome"] == "loss")
     breakevens = sum(1 for t in trades if t["outcome"] == "breakeven")
     trails     = sum(1 for t in trades if t["outcome"] == "trail")
-    win_rate   = round(wins / total * 100, 1) if total else 0.0
+    win_rate   = round(float(wins / total * 100), 1) if total else 0.0
 
-    net_pct = round((final_equity - STARTING_EQUITY) / STARTING_EQUITY * 100, 2)
-    net_abs = round(final_equity - STARTING_EQUITY, 2)
+    net_pct = round(float((final_equity - STARTING_EQUITY) / STARTING_EQUITY * 100), 2)
+    net_abs = round(float(final_equity - STARTING_EQUITY), 2)
 
-    avg_win     = round(sum(t["pnl_pct"] for t in trades if t["outcome"] == "win")       / wins,       2) if wins       else 0.0
-    avg_loss    = round(sum(t["pnl_pct"] for t in trades if t["outcome"] == "loss")      / losses,     2) if losses     else 0.0
-    avg_be      = round(sum(t["pnl_pct"] for t in trades if t["outcome"] == "breakeven") / breakevens, 2) if breakevens else 0.0
-    avg_trail   = round(sum(t["pnl_pct"] for t in trades if t["outcome"] == "trail")  / trails,   2) if trails   else 0.0
-    avg_hold    = round(sum(t["bars_held"] for t in trades) / total, 1) if total else 0.0
-    avg_rr      = round(-avg_win / avg_loss, 2) if avg_loss != 0 else 0.0
-    total_cost  = round(sum(t.get("trade_cost", 0) for t in trades), 2)
+    avg_win     = round(float(sum(t["pnl_pct"] for t in trades if t["outcome"] == "win")       / wins),       2) if wins       else 0.0
+    avg_loss    = round(float(sum(t["pnl_pct"] for t in trades if t["outcome"] == "loss")      / losses),     2) if losses     else 0.0
+    avg_be      = round(float(sum(t["pnl_pct"] for t in trades if t["outcome"] == "breakeven") / breakevens), 2) if breakevens else 0.0
+    avg_trail   = round(float(sum(t["pnl_pct"] for t in trades if t["outcome"] == "trail") / trails), 2) if trails else 0.0
+    avg_hold    = round(float(sum(t["bars_held"] for t in trades) / total), 1) if total else 0.0
+    avg_rr      = round(float(-avg_win / avg_loss), 2) if avg_loss != 0 else 0.0
+    total_cost  = round(float(sum(t.get("trade_cost", 0) for t in trades)), 2)
 
     print()
     print("=" * width)

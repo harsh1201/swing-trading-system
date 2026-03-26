@@ -1,35 +1,81 @@
-# 📈 Swing Trading System (NSE India)
+# 📈 NSE India Swing Trading System
 
-A rule-based swing trading system using:
-- Trend + Consolidation Breakouts
-- Market Regime Filtering
-- Risk-defined execution
+> A rule-based, statistically validated swing trading framework for the Indian stock market (NSE).
 
 ---
 
-## 📊 Performance
-- Win Rate: ~25%
-- RR: ~1:1.8
-- Backtested: 2019–2025
+## 🚀 Overview
+
+This repository provides a complete system for finding and backtesting breakout strategies in the Indian stock market. It combines **market regime filtering**, **tight consolidation (coils)**, and **volume analysis** to identify high-probability swing trading setups.
+
+-   **Live Screener**: Automatically scan the NSE universe for daily trade setups.
+-   **Backtest Engine**: Rigorous historical validation with concurrent positions and risk management.
+-   **Rule-Based Logic**: 100% mechanical strategy based on EMA trends and volatility contraction.
 
 ---
 
-## 🧠 Strategy Overview
+## ✨ Key Features
 
-See full system documentation:
+-   **Market Regime Filter**: Automatically stand aside in BEAR regimes (Nifty 50 < EMA50).
+-   **Precision Scanners**: Filter stocks based on custom trend, coil, and volume rules.
+-   **Risk-Defined Sizing**: Automatically calculates position sizes based on a 1% portfolio risk model.
+-   **Cost Modeling**: Real-world backtesting including slippage and transaction costs.
+-   **Walk-Forward Validation**: Built-in robustness testing across years of market data.
 
-👉 docs/system_overview.md
+---
 
-## 🚀 How to Run
+## 🏛 System Architecture
 
+The system is modular and designed for easy extension:
+
+1.  **`screener.py`**: Daily live execution tool.
+2.  **`backtest.py`**: Strategy research and verification.
+3.  **`strategies/breakout.py`**: Core strategy logic (the "Brain").
+4.  **`config/settings.py`**: User-defined risk and system parameters.
+
+👉 See the full [Architecture Documentation](docs/architecture.md) for more details.
+
+---
+
+## 🛠 Quick Start
+
+### 1. **Install**
 ```bash
-git clone https://github.com/YOUR_USERNAME/swing-trading-system.git
-cd swing-trading-system
-
 pip install -r requirements.txt
+```
 
-# Run screener
+### 2. **Run Screener**
+Identify today's top trade setups:
+```bash
 python screener.py
+```
 
-# Run backtest
+### 3. **Run Backtest**
+Validate the historical performance:
+```bash
 python backtest.py
+```
+
+---
+
+## 📚 Detailed Documentation
+
+-   [🏛 System Architecture](docs/architecture.md)
+-   [🧠 Strategy Overview](docs/system_overview.md)
+-   [⚙️ Installation Guide](docs/installation.md)
+-   [📈 Usage Guide](docs/usage_guide.md)
+
+---
+
+## 📊 Performance Expectations
+
+This system expects a **low win rate (~25%)** but achieves profitability through a **high Risk-to-Reward ratio (1:2)**. Success depends on:
+1.  **Discipline**: Never override the system.
+2.  **Consistency**: Execute every "GO" signal in BULL regimes.
+3.  **Risk Management**: Always respect the 1% risk per trade.
+
+---
+
+## ⚖️ Disclaimer
+
+*Trading in the stock market involves significant risk. This software is for educational and research purposes only. Always consult with a certified financial advisor before making any investment decisions.*

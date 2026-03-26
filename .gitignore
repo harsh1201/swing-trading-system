@@ -1,1 +1,21 @@
+# Individual data files
 data/*.csv
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Local development environments
+venv/
+.venv/
+env/
+.env
+
+# Editor settings
+.vscode/
+
+# Static types/cache
+.mypy_cache/
+.pytest_cache/

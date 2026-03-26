@@ -25,12 +25,81 @@ Three-stage stock filter:
 """
 
 import sys
+from typing import TypedDict
+
 import yfinance as yf
 import pandas as pd
 from datetime import datetime, timedelta
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
+
+
+# ── Type definitions ─────────────────────────────────────────────────────────
+
+class MarketRegimeResult(TypedDict):
+    close: float | None
+    ema50: float | None
+    is_bullish: bool
+    error: str | None
+
+
+class TrendResult(TypedDict):
+    close: float
+    ema50: float
+    ema200: float
+    is_bullish: bool
+
+
+class ConsolidationResult(TypedDict):
+    period_high: float
+    period_low: float
+    range_pct: float
+    gap_to_high_pct: float
+    near_high: bool
+    is_consolidating: bool
+
+
+class VolumeResult(TypedDict):
+    latest_volume: int
+    avg_volume: int
+    surge_ratio: float
+    volume_ok: bool
+
+
+class GapUpResult(TypedDict):
+    today_open: float
+    gap_pct: float
+    is_gap_up: bool
+
+
+class ScoreResult(TypedDict):
+    total: float
+    risk_score: float
+    range_score: float
+    trend_score: float
+    ema50_gap_pct: float
+
+
+class TradeSetupResult(TypedDict):
+    entry: float
+    stop_loss: float
+    target: float
+    risk: float
+    risk_pct: float
+    rr_ratio: float
+    is_valid: bool
+
+
+class SetupEntry(TypedDict):
+    name: str
+    ticker: str
+    trend: TrendResult
+    cons: ConsolidationResult
+    setup: TradeSetupResult
+    vol: VolumeResult
+    gap: GapUpResult
+    score: ScoreResult
 
 
 # ── Configuration ─────────────────────────────────────────────────────────────
@@ -171,7 +240,7 @@ def check_market_regime(
     ticker: str = NIFTY_TICKER,
     ema_period: int = EMA_SHORT,
     days: int = PERIOD_DAYS,
-) -> dict:
+) -> MarketRegimeResult:
     """
     Fetch the index and determine whether the broad market is bullish.
 
@@ -197,7 +266,7 @@ def check_market_regime(
     }
 
 
-def check_bullish_trend(df: pd.DataFrame) -> dict:
+def check_bullish_trend(df: pd.DataFrame) -> TrendResult:
     """
     Compute EMA50 & EMA200 and evaluate the latest bar.
 
@@ -225,7 +294,7 @@ def check_consolidation(
     candles:       int   = CONSOLIDATION_CANDLES,
     max_range_pct: float = MAX_RANGE_PCT,
     near_high_pct: float = NEAR_HIGH_PCT,
-) -> dict:
+) -> ConsolidationResult:
     """
     Analyse the last `candles` bars for a tight consolidation pattern.
 
@@ -243,9 +312,9 @@ def check_consolidation(
     period_low  = round(float(window["Low"].min()),  2)
     close       = round(float(df["Close"].iloc[-1]), 2)
 
-    range_pct   = round((period_high - period_low) / period_low * 100, 2)
+    range_pct   = round(float((period_high - period_low) / period_low * 100), 2)
     # How far is close below the recent high, expressed as %
-    gap_to_high = round((period_high - close) / period_high * 100, 2)
+    gap_to_high = round(float((period_high - close) / period_high * 100), 2)
     near_high   = gap_to_high <= near_high_pct
 
     is_consolidating = (range_pct <= max_range_pct) and near_high
@@ -264,7 +333,7 @@ def check_volume(
     df: pd.DataFrame,
     avg_period:    int   = VOLUME_AVG_PERIOD,
     surge_factor:  float = VOLUME_SURGE_FACTOR,
-) -> dict:
+) -> VolumeResult:
     """
     Compare the latest candle's volume against the rolling average.
 
@@ -281,7 +350,7 @@ def check_volume(
     baseline       = df["Volume"].iloc[-(avg_period + 1):-1]
     avg_volume     = round(float(baseline.mean()), 0)
     latest_volume  = round(float(df["Volume"].iloc[-1]), 0)
-    surge_ratio    = round(latest_volume / avg_volume, 2) if avg_volume > 0 else 0.0
+    surge_ratio    = round(float(latest_volume / avg_volume), 2) if avg_volume > 0 else 0.0
 
     return {
         "latest_volume": int(latest_volume),
@@ -295,7 +364,7 @@ def check_gap_up(
     df: pd.DataFrame,
     entry_price:   float,
     threshold:     float = GAP_UP_THRESHOLD,
-) -> dict:
+) -> GapUpResult:
     """
     Detect whether today's open has already gapped above the entry level.
 
@@ -310,7 +379,7 @@ def check_gap_up(
     Returns: today_open, gap_pct, is_gap_up
     """
     today_open = round(float(df["Open"].iloc[-1]), 2)
-    gap_pct    = round((today_open - entry_price) / entry_price * 100, 2)
+    gap_pct    = round(float((today_open - entry_price) / entry_price * 100), 2)
 
     return {
         "today_open": today_open,
@@ -346,7 +415,7 @@ def _trend_score(ema50_gap_pct: float) -> float:
         return max(0.0, 12.5 - ((ema50_gap_pct - 6.0) / 6.0) * 12.5)
 
 
-def score_setup(trend: dict, cons: dict, setup: dict) -> dict:
+def score_setup(trend: TrendResult, cons: ConsolidationResult, setup: TradeSetupResult) -> ScoreResult:
     """
     Score a trade setup out of 100 using three components.
 
@@ -369,14 +438,14 @@ def score_setup(trend: dict, cons: dict, setup: dict) -> dict:
     ema50_gap_pct = (trend["close"] - trend["ema50"]) / trend["ema50"] * 100
     trend_score   = _trend_score(ema50_gap_pct)
 
-    total = round(risk_score + range_score + trend_score, 1)
+    total = round(float(risk_score + range_score + trend_score), 1)
 
     return {
         "total":          total,
-        "risk_score":     round(risk_score,     1),
-        "range_score":    round(range_score,    1),
-        "trend_score":    round(trend_score,    1),
-        "ema50_gap_pct":  round(ema50_gap_pct,  2),
+        "risk_score":     round(float(risk_score),     1),
+        "range_score":    round(float(range_score),    1),
+        "trend_score":    round(float(trend_score),    1),
+        "ema50_gap_pct":  round(float(ema50_gap_pct),  2),
     }
 
 
@@ -385,7 +454,7 @@ def calculate_trade_setup(
     period_low:   float,
     reward_ratio: float = REWARD_RATIO,
     max_risk_pct: float = MAX_RISK_PCT,
-) -> dict:
+) -> TradeSetupResult:
     """
     Build a breakout trade plan from the consolidation range.
 
@@ -397,11 +466,11 @@ def calculate_trade_setup(
 
     Returns: entry, stop_loss, target, risk, risk_pct, rr_ratio, is_valid
     """
-    entry     = round(period_high, 2)
-    stop_loss = round(period_low,  2)
-    risk      = round(entry - stop_loss, 2)
-    target    = round(entry + reward_ratio * risk, 2)
-    risk_pct  = round(risk / entry * 100, 2)
+    entry     = round(float(period_high), 2)
+    stop_loss = round(float(period_low),  2)
+    risk      = round(float(entry - stop_loss), 2)
+    target    = round(float(entry + reward_ratio * risk), 2)
+    risk_pct  = round(float(risk / entry * 100), 2)
 
     return {
         "entry":      entry,
@@ -425,15 +494,15 @@ def _rank_label(rank: int) -> str:
 
 def _score_bar(score: float, width: int = 20) -> str:
     """Render a simple ASCII progress bar for a 0–100 score."""
-    filled = round(score / 100 * width)
+    filled = round(float(score / 100 * width))
     return "[" + "#" * filled + "-" * (width - filled) + f"]  {score:.1f}/100"
 
 
 def print_trade_card(rank: int, name: str, ticker: str,
-                     trend: dict, cons: dict, setup: dict,
-                     vol: dict, gap: dict, score: dict, width: int) -> None:
+                     trend: TrendResult, cons: ConsolidationResult, setup: TradeSetupResult,
+                     vol: VolumeResult, gap: GapUpResult, score: ScoreResult, width: int) -> None:
     """Print a ranked, scored trade setup card for a single stock."""
-    upside_pct  = round((setup["target"] - setup["entry"]) / setup["entry"] * 100, 2)
+    upside_pct  = round(float((setup["target"] - setup["entry"]) / setup["entry"] * 100), 2)
     label       = _rank_label(rank)
     vol_tag     = "Volume OK ✅" if vol["volume_ok"] else "Weak Volume ⚠️"
 
@@ -501,7 +570,7 @@ def print_trade_card(rank: int, name: str, ticker: str,
           f"   ({setup['risk_pct']:.2f}% of entry)")
 
 
-def main():
+def main() -> None:
     width   = 72
     total   = len(STOCKS)
     scanned = 0
@@ -510,7 +579,7 @@ def main():
     coil_passed  = 0
     risk_passed  = 0
     vol_passed   = 0
-    final_setups = []
+    final_setups: list[SetupEntry] = []
 
     # ── Header ────────────────────────────────────────────────────────────────
     print("=" * width)
@@ -540,7 +609,9 @@ def main():
     else:
         status      = "BULLISH" if regime["is_bullish"] else "BEARISH"
         status_icon = "✅" if regime["is_bullish"] else "🚫"
-        gap_pct     = round((regime["close"] - regime["ema50"]) / regime["ema50"] * 100, 2)
+        assert regime["close"] is not None
+        assert regime["ema50"] is not None
+        gap_pct     = round(float((regime["close"] - regime["ema50"]) / regime["ema50"] * 100), 2)
         gap_sign    = "+" if gap_pct >= 0 else ""
 
         print(f"  {'Nifty Close':<22}  {regime['close']:>10,.2f}")
