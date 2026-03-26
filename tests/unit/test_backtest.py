@@ -1,0 +1,121 @@
+import pytest
+import pandas as pd
+import sys
+from collections import defaultdict
+from backtest import (
+    get_sector,
+    _close,
+    _close_short,
+    scan_candidates,
+    scan_candidates_short,
+    Trade,
+    _period_stats,
+    run_backtest,
+    run_backtest_short,
+    print_year_breakdown,
+    print_volume_analysis,
+    print_summary,
+    print_summary_short,
+    print_walkforward_summary,
+    fetch_all,
+    run_backtest_strategy,
+    run_backtest_strategy_short,
+    main,
+)
+
+def test_get_sector():
+    assert get_sector("HDFCBANK.NS") == "BANKING"
+    assert get_sector("UNKNOWN.NS") == "OTHER"
+
+def test_close_logic():
+    trade: Trade = {
+        "ticker": "T", "name": "T", "sector": "S", "df": pd.DataFrame(),
+        "entry_price": 100, "effective_entry": 101, "stop_loss": 90, "target": 120,
+        "active_sl": 90, "be_hit": False, "nifty_entry_idx": 1, "signal_date": "2023-01-01",
+        "qty": 10, "score": 80, "volume_ratio": 2
+    }
+    closed = []
+    _close(trade, 120, "win", 10, closed)
+    _close_short(trade, 80, "win", 10, closed)
+    assert len(closed) == 2
+
+def test_period_stats():
+    ts = [{"outcome": "win", "pnl_abs": 100, "pnl_pct": 2.0}]
+    s = _period_stats(ts)
+    assert s["total"] == 1
+
+def test_scan_candidates_full(monkeypatch):
+    monkeypatch.setattr("backtest.check_liquidity", lambda df, idx: True)
+    monkeypatch.setattr("backtest.check_trend", lambda df, idx: {"close": 100})
+    monkeypatch.setattr("backtest.check_trend_short", lambda df, idx: {"close": 100})
+    monkeypatch.setattr("backtest.check_consolidation", lambda df, idx: {"period_high": 105, "period_low": 95})
+    monkeypatch.setattr("backtest.check_consolidation_short", lambda df, idx: {"period_high": 105, "period_low": 95})
+    monkeypatch.setattr("backtest.check_volume", lambda df, idx: {"surge_ratio": 2})
+    monkeypatch.setattr("backtest.score_long_breakout", lambda t, c: {"total": 80})
+    monkeypatch.setattr("backtest.score_short_breakout", lambda t, c: {"total": 80})
+    
+    d = pd.date_range("2023-01-01", periods=300)
+    df = pd.DataFrame({"Close": [100.0]*300, "High": [100.0]*300, "Low": [100.0]*300, "Open": [100.0]*300, "Volume": [1000]*300}, index=d)
+    sdata = {"T": df}
+    assert len(scan_candidates(sdata, d[250])) == 1
+    assert len(scan_candidates_short(sdata, d[250])) == 1
+
+def test_engines(monkeypatch):
+    monkeypatch.setattr("backtest.BACKTEST_DAYS", 10)
+    monkeypatch.setattr("backtest.EMA_LONG", 5)
+    d = pd.date_range("2023-01-01", periods=50)
+    ndf = pd.DataFrame({"Close": [100.0]*50}, index=d)
+    # 6 columns: Close, High, Low, Open, Volume, EMA20
+    sdf = pd.DataFrame({
+        "Close": [100.0]*50, "High": [100.0]*50, "Low": [100.0]*50, "Open": [100.0]*50, "Volume": [1000]*50, "EMA20": [90.0]*50
+    }, index=d)
+    sdata = {"T": sdf}
+    
+    monkeypatch.setattr("backtest.get_market_regime", lambda n, i, s: (True, "STRONG_BULL", 50))
+    monkeypatch.setattr("backtest.get_market_regime_short", lambda n, i, s: (True, "STRONG_BEAR", 50))
+    
+    # scan_candidates mock
+    def mock_scan(s, d_cur):
+        if d_cur == d[40]:
+            return [{"ticker": "T", "name": "T", "idx": 40, "df": s["T"], "entry": 105, "stop_loss": 95, "target": 125, "score": 80, "volume_ratio": 2}]
+        return []
+    monkeypatch.setattr("backtest.scan_candidates", mock_scan)
+    
+    def mock_scan_short(s, d_cur):
+        if d_cur == d[40]:
+            return [{"ticker": "T", "name": "T", "idx": 40, "df": s["T"], "entry": 95, "stop_loss": 105, "target": 75, "score": 80, "volume_ratio": 2}]
+        return []
+    monkeypatch.setattr("backtest.scan_candidates_short", mock_scan_short)
+    
+    # ── LONG RUN ─────────────────────────────────────────────────────────────
+    sdf.iloc[41, 0:6] = [106.0, 107.0, 105.0, 106.0, 1000.0, 91.0]
+    sdf.iloc[45, 0:6] = [126.0, 127.0, 125.0, 126.0, 1000.0, 110.0]
+    run_backtest(ndf, sdata)
+    
+    # ── SHORT RUN ────────────────────────────────────────────────────────────
+    sdf.iloc[41, 0:6] = [94.0, 95.0, 93.0, 94.0, 1000.0, 109.0]
+    sdf.iloc[45, 0:6] = [74.0, 76.0, 73.0, 74.0, 1000.0, 85.0]
+    run_backtest_short(ndf, sdata)
+
+def test_summaries(capsys):
+    ts = [{"ticker": "T", "signal_date": "2023-01-01", "outcome": "win", "pnl_abs": 100, "pnl_pct": 2.0, "bars_held": 5, "volume_ratio": 2.0, "name": "T", "score": 80}]
+    print_summary(ts, 1100)
+    print_summary_short(ts, 1100)
+    print_year_breakdown(ts)
+    print_volume_analysis(ts)
+    print_walkforward_summary(ts)
+    assert "SUMMARY" in capsys.readouterr().out
+
+def test_wrappers(monkeypatch):
+    d = pd.date_range("2023-01-01", periods=10)
+    df = pd.DataFrame({"Close": [100.0]*10}, index=d)
+    monkeypatch.setattr("backtest.fetch_ohlcv", lambda t, d6, refresh=False: df)
+    monkeypatch.setattr("backtest.run_backtest", lambda n, s: ([], 100.0))
+    monkeypatch.setattr("backtest.run_backtest_short", lambda n, s: ([], 100.0))
+    run_backtest_strategy()
+    run_backtest_strategy_short()
+
+def test_main(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["backtest.py", "--strategy", "long_breakout"])
+    monkeypatch.setattr("backtest.run_backtest_strategy", lambda: None)
+    main()

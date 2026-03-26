@@ -27,8 +27,9 @@ Concurrent positions
 
 Usage
 -----
-  python backtest.py                         # default (long_breakout) strategy
-  python backtest.py --strategy long_breakout # explicit strategy name
+  python backtest.py                              # default (long_breakout) strategy
+  python backtest.py --strategy long_breakout     # explicit long strategy
+  python backtest.py --strategy short_breakout    # short breakdown strategy
 """
 
 import sys
@@ -78,6 +79,15 @@ from strategies.long_breakout import (
     check_volume,
     check_liquidity,
     score_long_breakout,
+)
+from strategies.short_breakout import (
+    TrendResult as ShortTrendResult,
+    ConsolidationResult as ShortConsolidationResult,
+    get_market_regime_short,
+    check_trend_short,
+    check_consolidation_short,
+    score_short_breakout,
+    calculate_trade_setup_short,
 )
 
 
@@ -263,18 +273,18 @@ def _close(
 
     Returns pnl_abs so the caller can update running equity.
     """
-    eff_entry  = trade["effective_entry"]
-    eff_exit   = round(float(exit_price * (1 - SLIPPAGE_PCT)), 2)
-    qty        = trade["qty"]
-    cost       = round(float(eff_entry * qty * COST_PCT), 2)
-    pnl_abs    = qty * (eff_exit - eff_entry) - cost
-    pnl_pct    = round(float(pnl_abs / (eff_entry * qty) * 100), 2) if qty > 0 else 0.0
-    bars_held  = nifty_idx - trade["nifty_entry_idx"]
+    eff_entry = float(trade["effective_entry"])
+    eff_exit = round(float(exit_price * (1 - SLIPPAGE_PCT)), 2)
+    qty = float(trade["qty"])
+    cost = round(float(eff_entry * qty * COST_PCT), 2)
+    pnl_abs = qty * (eff_exit - eff_entry) - cost
+    pnl_pct = round(float(pnl_abs / (eff_entry * qty) * 100), 2) if (eff_entry * qty) != 0 else 0.0
+    bars_held = int(nifty_idx - trade["nifty_entry_idx"])
 
     trade["exit_price"] = round(float(exit_price), 2)
-    trade["outcome"]    = outcome
-    trade["pnl_abs"]    = round(float(pnl_abs), 2)   # cost-adjusted absolute P&L (INR)
-    trade["pnl_pct"]    = pnl_pct
+    trade["outcome"] = outcome
+    trade["pnl_abs"] = round(float(pnl_abs), 2)
+    trade["pnl_pct"] = pnl_pct
     trade["trade_cost"] = cost
     trade["bars_held"]  = bars_held
     closed_trades.append(trade)
@@ -546,13 +556,12 @@ def print_year_breakdown(trades: list[Trade], width: int = 62) -> None:
     print("  " + "-" * (len(hdr) - 2))
 
     for year in sorted(by_year):
-        s    = _period_stats(by_year[year])
-        sign = "+" if s["pnl_pct"] >= 0 else ""
+        s = _period_stats(by_year[year])
         print(
             f"  {year:<6}  {s['total']:>6}  {s['wins']:>4}  "
             f"{s['win_rate']:>4.1f}%  "
-            f"{sign}{s['pnl_pct']:>+6.2f}%  "
-            f"(Rs.{s['pnl_abs']:>+10,.0f})"
+            f"{s['pnl_pct']:>+7.2f}%  "
+            f"(Rs.{s['pnl_abs']:>+11,.0f})"
         )
 
     # ── Timeout sub-table (Part 5 — detect regime shifts) ─────────────────────
@@ -567,9 +576,8 @@ def print_year_breakdown(trades: list[Trade], width: int = 62) -> None:
             print(f"  {year:<6}  {'—':>8}  {'—':>8}")
             continue
         avg_to = round(float(sum(t["pnl_pct"] for t in to_trades) / len(to_trades)), 2)
-        sign   = "+" if avg_to >= 0 else ""
         note   = "trending" if avg_to >= 1.0 else ("choppy" if avg_to <= -1.0 else "sideways")
-        print(f"  {year:<6}  {len(to_trades):>8}  {sign}{avg_to:>+7.2f}%  {note:>20}")
+        print(f"  {year:<6}  {len(to_trades):>8}  {avg_to:>+8.2f}%  {note:>20}")
 
     print("=" * width)
 
@@ -648,12 +656,11 @@ def print_walkforward_summary(trades: list[Trade], width: int = 62) -> None:
             print("    No trades in this period.")
             continue
         s    = _period_stats(ts)
-        sign = "+" if s["pnl_pct"] >= 0 else ""
         print(f"  {'Trades':<28}  {s['total']}")
         print(f"  {'Wins / Losses':<28}  {s['wins']} / {s['losses']}")
         print(f"  {'Breakevens / Trailing':<28}  {s['breakevens']} / {s['trails']}")
         print(f"  {'Win rate':<28}  {s['win_rate']:.1f}%")
-        print(f"  {'Approx net P&L':<28}  {sign}{s['pnl_pct']:.2f}%  (Rs.{s['pnl_abs']:>+,.0f})")
+        print(f"  {'Approx net P&L':<28}  {s['pnl_pct']:+.2f}%  (Rs.{s['pnl_abs']:>+,.0f})")
 
     print()
     print("=" * width)
@@ -786,19 +793,470 @@ def run_backtest_strategy() -> None:
     print_summary(trades, final_equity)
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# SHORT BREAKDOWN BACKTEST
+# ══════════════════════════════════════════════════════════════════════════════
+
+def scan_candidates_short(
+    stock_data: dict[str, pd.DataFrame],
+    date: pd.Timestamp,
+) -> list[Candidate]:
+    """
+    Return all stocks passing Liquidity + Bearish Trend + Coil-near-low +
+    Volume filters for `date`, each carrying its score and trade levels.
+    Sorted best-first.
+    """
+    candidates: list[Candidate] = []
+
+    for ticker, df in stock_data.items():
+        if date not in df.index:
+            continue
+        idx = df.index.get_loc(date)
+
+        if idx < max(COIL_CANDLES, EMA_LONG, VOLUME_AVG_PERIOD):
+            continue
+
+        if float(df["Close"].iloc[idx]) < MIN_PRICE:
+            continue
+
+        if not check_liquidity(df, idx):
+            continue
+
+        trend = check_trend_short(df, idx)
+        if trend is None:
+            continue
+
+        coil = check_consolidation_short(df, idx)
+        if coil is None:
+            continue
+
+        vol = check_volume(df, idx)
+        if vol is None:
+            continue
+
+        # Short: entry = period_low, SL = period_high
+        entry     = coil["period_low"]
+        stop_loss = coil["period_high"]
+        risk      = stop_loss - entry
+        target    = entry - REWARD_RATIO * risk
+        sc        = score_short_breakout(trend, coil)
+
+        if sc["total"] < MIN_SCORE_THRESHOLD:
+            continue
+
+        candidates.append({
+            "ticker":       ticker,
+            "name":         STOCKS.get(ticker, ticker),
+            "df":           df,
+            "idx":          idx,
+            "trend":        trend,
+            "coil":         coil,
+            "entry":        entry,
+            "stop_loss":    stop_loss,
+            "target":       target,
+            "score":        sc["total"],
+            "volume_ratio": vol["surge_ratio"],
+        })
+
+    candidates.sort(key=lambda x: x["score"], reverse=True)
+    return candidates
+
+
+def _close_short(
+    trade:         Trade,
+    exit_price:    float,
+    outcome:       str,
+    nifty_idx:     int,
+    closed_trades: list[Trade],
+) -> float:
+    """
+    Finalise an open SHORT trade: apply exit slippage (higher fill on cover),
+    deduct transaction costs, record outcome, and print log line.
+
+    Execution model (SHORT)
+    -----------------------
+      effective_entry  : stored on the trade at open (shorted lower)
+      effective_exit   : exit_price * (1 + SLIPPAGE_PCT)  (covered higher)
+      cost             : effective_entry × qty × COST_PCT
+      pnl_abs          : (effective_entry − effective_exit) × qty − cost
+                         (profit when price falls)
+    """
+    eff_entry = float(trade["effective_entry"])
+    eff_exit = round(float(exit_price * (1 + SLIPPAGE_PCT)), 2)
+    qty = float(trade["qty"])
+    cost = round(float(eff_entry * qty * COST_PCT), 2)
+    pnl_abs = qty * (eff_entry - eff_exit) - cost
+    pnl_pct = round(float(pnl_abs / (eff_entry * qty) * 100), 2) if (eff_entry * qty) != 0 else 0.0
+    bars_held = int(nifty_idx - trade["nifty_entry_idx"])
+
+    trade["exit_price"] = round(float(exit_price), 2)
+    trade["outcome"]    = outcome
+    trade["pnl_abs"]    = round(float(pnl_abs), 2)
+    trade["pnl_pct"]    = pnl_pct
+    trade["trade_cost"] = cost
+    trade["bars_held"]  = bars_held
+    closed_trades.append(trade)
+
+    icon = {"win": "WIN ", "loss": "LOSS", "breakeven": "BE  ", "trail": "TRL "}.get(
+        outcome, "????")
+    print(
+        f"  {trade['signal_date']:<12} "
+        f"{trade['name']:<20} "
+        f"{trade['score']:>5.1f} "
+        f"vol {trade['volume_ratio']:>4.2f}x "
+        f"Rs.{eff_entry:>7,.0f} "
+        f"Rs.{trade['stop_loss']:>7,.0f} "
+        f"Rs.{trade['target']:>8,.0f} "
+        f"Rs.{eff_exit:>7,.0f} "
+        f"{pnl_pct:>+6.2f}%  {icon}"
+    )
+    return float(pnl_abs)
+
+
+def run_backtest_short(
+    nifty_df:   pd.DataFrame,
+    stock_data: dict[str, pd.DataFrame],
+) -> tuple[list[Trade], float]:
+    """
+    Concurrent multi-position SHORT backtest.
+
+    STEP A (each day) — Update every open short trade:
+      • Apply breakeven rule (Low <= entry - 1.5R and Close < entry).
+      • Close on SL hit (high >= active_sl) / target hit (low <= target) /
+        EMA20 trailing stop (Close > EMA20).
+      • Update equity on close.
+
+    STEP B (each day) — Open new short trades if slots are available:
+      • Market must be bearish (get_market_regime_short).
+      • Scan all stocks → Bearish Trend + Coil-near-low + Volume → score.
+      • For each candidate (best score first), confirm entry:
+          next bar must have Low <= entry AND Close <= entry.
+      • Size each trade so that a full stop-loss costs RISK_PER_TRADE % equity.
+
+    Returns (closed_trades, final_equity).
+    """
+    all_dates = nifty_df.index
+    start_idx = max(EMA_LONG + 10, len(all_dates) - BACKTEST_DAYS)
+    equity    = float(STARTING_EQUITY)
+
+    active_trades: list[Trade] = []
+    closed_trades: list[Trade] = []
+
+    print(f"\n  Short Backtest range  : {all_dates[start_idx].date()}  ->  {all_dates[-1].date()}")
+    print(f"  Bars in period       : {len(all_dates) - start_idx}")
+    print(f"  Max concurrent       : {MAX_CONCURRENT_TRADES} trades\n")
+
+    col = (
+        f"{'Date':<12} {'Name':<20} {'Score':>5} {'Vol':>7} "
+        f"{'Entry':>8} {'SL':>8} {'Target':>9} {'Exit':>8} {'PnL%':>6}  Result"
+    )
+    print("  " + col)
+    print("  " + "-" * len(col))
+
+    for i in range(start_idx, len(all_dates)):
+        date = all_dates[i]
+
+        # ── STEP A: Update every open short trade ────────────────────────────
+        still_open: list[Trade] = []
+
+        for trade in active_trades:
+            if i < trade["nifty_entry_idx"]:
+                still_open.append(trade)
+                continue
+
+            df     = trade["df"]
+            entry  = trade["entry_price"]
+            target = trade["target"]
+            risk   = trade["stop_loss"] - entry   # risk = SL - entry for shorts
+
+            if date not in df.index:
+                still_open.append(trade)
+                continue
+
+            bar       = df.index.get_loc(date)
+            high_bar  = float(df["High"].iloc[bar])
+            low_bar   = float(df["Low"].iloc[bar])
+            close_bar = float(df["Close"].iloc[bar])
+
+            # Breakeven: price dropped to trigger level → lower active stop to entry
+            if (
+                not trade["be_hit"]
+                and low_bar <= entry - risk * 1.5
+                and close_bar < entry
+            ):
+                trade["active_sl"] = entry
+                trade["be_hit"]    = True
+
+            # SL hit: price goes UP to stop loss (short loses when price rises)
+            if high_bar >= trade["active_sl"]:
+                outcome = "breakeven" if trade["be_hit"] else "loss"
+                equity += _close_short(trade, trade["active_sl"], outcome, i, closed_trades)
+
+            # Target hit: price goes DOWN to target (short wins when price falls)
+            elif low_bar <= target:
+                equity += _close_short(trade, target, "win", i, closed_trades)
+
+            else:
+                # Trailing exit: Close > EMA20 → exit (for shorts, reclaiming EMA20 is bearish exit)
+                ema20 = None
+                if "EMA20" in df.columns:
+                    val = df["EMA20"].iloc[bar]
+                    if not pd.isna(val):
+                        ema20 = float(val)
+
+                if ema20 is not None and close_bar > ema20:
+                    exit_price = float(df["Open"].iloc[bar + 1]) if bar + 1 < len(df) else float(df["Close"].iloc[bar])
+                    equity += _close_short(trade, exit_price, "trail", i, closed_trades)
+                else:
+                    still_open.append(trade)
+
+        active_trades = still_open
+
+        # ── STEP B: Open new short trades if slots are available ─────────────
+        if i >= len(all_dates) - 1:
+            continue
+
+        regime_ok, regime_label, _breadth = get_market_regime_short(nifty_df, i, stock_data)
+        if not regime_ok:
+            continue
+
+        effective_max = MAX_CONCURRENT_TRADES
+        if regime_label == "EARLY_BEAR" and EARLY_TREND_MAX_TRADES_FACTOR < 1.0:
+            effective_max = max(1, round(float(MAX_CONCURRENT_TRADES
+                                         * EARLY_TREND_MAX_TRADES_FACTOR)))
+
+        if len(active_trades) >= effective_max:
+            continue
+
+        active_tickers = {t["ticker"] for t in active_trades}
+        candidates     = scan_candidates_short(stock_data, date)
+        candidates     = [c for c in candidates if c["ticker"] not in active_tickers]
+
+        slots = effective_max - len(active_trades)
+        added = 0
+
+        active_sector_counts: dict[str, int] = defaultdict(int)
+        for t in active_trades:
+            active_sector_counts[t.get("sector", "OTHER")] += 1
+
+        for cand in candidates:
+            if added >= slots:
+                break
+
+            sector = get_sector(cand["ticker"])
+            if active_sector_counts[sector] >= MAX_TRADES_PER_SECTOR:
+                continue
+
+            next_bar = cand["idx"] + 1
+            if next_bar >= len(cand["df"]):
+                continue
+
+            # Entry confirmation: next bar must break down below entry
+            bar_low   = float(cand["df"]["Low"].iloc[next_bar])
+            bar_close = float(cand["df"]["Close"].iloc[next_bar])
+            if bar_low > cand["entry"] or bar_close > cand["entry"]:
+                continue
+
+            entry_price      = round(float(cand["entry"]),     2)
+            stop_loss        = round(float(cand["stop_loss"]), 2)
+            target           = round(float(cand["target"]),    2)
+
+            # Slippage: short entry fills slightly lower than signal price
+            effective_entry  = round(float(entry_price * (1 - SLIPPAGE_PCT)), 2)
+
+            # Risk per share uses effective_entry vs original SL (above)
+            risk_per_share   = stop_loss - effective_entry
+            if risk_per_share <= 0:
+                continue
+
+            qty = (equity * RISK_PER_TRADE / 100) / risk_per_share
+
+            max_qty = (equity * MAX_POSITION_PCT / 100) / effective_entry
+            qty     = min(qty, max_qty)
+            if qty <= 0:
+                continue
+
+            entry_stock_date = cand["df"].index[next_bar]
+            if entry_stock_date in all_dates:
+                nifty_entry_idx = all_dates.get_loc(entry_stock_date)
+            else:
+                nifty_entry_idx = i + 1
+
+            new_trade: Trade = {
+                "ticker":          cand["ticker"],
+                "name":            cand["name"],
+                "sector":          sector,
+                "df":              cand["df"],
+                "entry_price":     entry_price,
+                "effective_entry": effective_entry,
+                "stop_loss":       stop_loss,
+                "target":          target,
+                "active_sl":       stop_loss,
+                "be_hit":          False,
+                "nifty_entry_idx": nifty_entry_idx,
+                "signal_date":     str(date.date()),
+                "qty":             qty,
+                "score":           cand["score"],
+                "volume_ratio":    cand["volume_ratio"],
+            }
+            active_trades.append(new_trade)
+            active_tickers.add(cand["ticker"])
+            active_sector_counts[sector] = active_sector_counts[sector] + 1
+            added += 1
+
+    # Force-close anything still open at end of data
+    last_i    = len(all_dates) - 1
+    last_date = all_dates[last_i]
+
+    for trade in active_trades:
+        df = trade["df"]
+        if last_date in df.index:
+            last_bar = df.index.get_loc(last_date)
+        else:
+            past = df.index[df.index < last_date]
+            if past.empty:
+                continue
+            last_bar = df.index.get_loc(past[-1])
+
+        exit_price = float(df["Close"].iloc[last_bar])
+        equity    += _close_short(trade, exit_price, "trail", last_i, closed_trades)
+
+    return closed_trades, equity
+
+
+def print_summary_short(trades: list[Trade], final_equity: float) -> None:
+    """Print trade statistics for SHORT backtest."""
+    width      = 62
+    total      = len(trades)
+    wins       = sum(1 for t in trades if t["outcome"] == "win")
+    losses     = sum(1 for t in trades if t["outcome"] == "loss")
+    breakevens = sum(1 for t in trades if t["outcome"] == "breakeven")
+    trails     = sum(1 for t in trades if t["outcome"] == "trail")
+    win_rate   = round(float(wins / total * 100), 1) if total else 0.0
+
+    net_pct = round(float((final_equity - STARTING_EQUITY) / STARTING_EQUITY * 100), 2)
+    net_abs = round(float(final_equity - STARTING_EQUITY), 2)
+
+    avg_win     = round(float(sum(t["pnl_pct"] for t in trades if t["outcome"] == "win")       / wins),       2) if wins       else 0.0
+    avg_loss    = round(float(sum(t["pnl_pct"] for t in trades if t["outcome"] == "loss")      / losses),     2) if losses     else 0.0
+    avg_be      = round(float(sum(t["pnl_pct"] for t in trades if t["outcome"] == "breakeven") / breakevens), 2) if breakevens else 0.0
+    avg_trail   = round(float(sum(t["pnl_pct"] for t in trades if t["outcome"] == "trail") / trails), 2) if trails else 0.0
+    avg_hold    = round(float(sum(t["bars_held"] for t in trades) / total), 1) if total else 0.0
+    avg_rr      = round(float(-avg_win / avg_loss), 2) if avg_loss != 0 else 0.0
+    total_cost  = round(float(sum(t.get("trade_cost", 0) for t in trades)), 2)
+
+    print()
+    print("=" * width)
+    print(f"{'SHORT BACKTEST SUMMARY':^{width}}")
+    print("=" * width)
+
+    print(f"  {'Strategy':<30}  Short Breakdown (Trend + Coil)")
+    print(f"  {'Market filter':<30}  Nifty close < EMA50 (bearish)")
+    print(f"  {'Coil window':<30}  {COIL_CANDLES} candles  |  range < {MAX_RANGE_PCT}%")
+    print(f"  {'Entry':<30}  period_low (breakdown confirmed)")
+    print(f"  {'Stop loss':<30}  period_high (box top)")
+    print(f"  {'Target':<30}  entry - {int(REWARD_RATIO)}x risk  (1:{int(REWARD_RATIO)} RR)")
+    print(f"  {'Breakeven rule':<30}  SL -> entry at low <= entry-1.5R & close < entry")
+    score_note = f">= {MIN_SCORE_THRESHOLD}" if MIN_SCORE_THRESHOLD > 0 else "disabled (0)"
+    print(f"  {'Min score filter':<30}  {score_note}")
+    print(f"  {'Trailing exit':<30}  Close > EMA20 (exit next open)")
+    print(f"  {'Risk per trade':<30}  {RISK_PER_TRADE}% of equity  (per position)")
+    print(f"  {'Max concurrent trades':<30}  {MAX_CONCURRENT_TRADES}")
+    print(f"  {'Sector cap':<30}  max {MAX_TRADES_PER_SECTOR} open trades per sector")
+    print(f"  {'Position cap':<30}  max {MAX_POSITION_PCT}% of equity per trade")
+    print(f"  {'Slippage':<30}  {SLIPPAGE_PCT*100:.2f}% per side")
+    print(f"  {'Transaction cost':<30}  {COST_PCT*100:.2f}% of trade value")
+
+    print("-" * width)
+    print(f"  {'Total trades':<30}  {total}")
+    print(f"  {'Wins  (target hit)':<30}  {wins}")
+    print(f"  {'Losses  (full stop-out)':<30}  {losses}")
+    print(f"  {'Breakevens  (SL -> entry)':<30}  {breakevens}")
+    print(f"  {'Trailing exits  (>EMA20)':<30}  {trails}")
+    print(f"  {'Win rate':<30}  {win_rate}%")
+
+    print("-" * width)
+    print(f"  {'Avg win':<30}  +{avg_win}%")
+    print(f"  {'Avg loss  (full)':<30}  {avg_loss}%")
+    print(f"  {'Avg breakeven exit':<30}  {avg_be:+.2f}%")
+    print(f"  {'Avg trailing exit':<30}  {avg_trail:+.2f}%")
+    print(f"  {'Realised RR':<30}  1 : {avg_rr}")
+    print(f"  {'Avg hold (bars)':<30}  {avg_hold}")
+
+    print("-" * width)
+    print(f"  {'Starting equity':<30}  Rs. {STARTING_EQUITY:>10,.0f}")
+    print(f"  {'Final equity':<30}  Rs. {final_equity:>10,.0f}")
+    sign = "+" if net_pct >= 0 else ""
+    print(f"  {'Net P&L  (after costs)':<30}  Rs. {net_abs:>+10,.0f}  ({sign}{net_pct}%)")
+    print(f"  {'Total costs paid':<30}  Rs. {total_cost:>10,.0f}")
+    print("=" * width)
+
+    print_year_breakdown(trades, width)
+    print_volume_analysis(trades, width)
+    print_walkforward_summary(trades, width)
+    print()
+
+
+def run_backtest_strategy_short() -> None:
+    """Run the full short breakdown backtest pipeline."""
+    width = 62
+    print("=" * width)
+    print(f"{'SHORT BREAKDOWN BACKTEST  —  FULL STRATEGY':^{width}}")
+    print(f"{'Universe : ' + str(len(STOCKS)) + ' stocks':^{width}}")
+    print(f"{'Coil {c}c  Range<{r}%  NearLow<{nh}%  RR 1:{rr}'.format(c=COIL_CANDLES, r=int(MAX_RANGE_PCT), nh=int(NEAR_HIGH_PCT), rr=int(REWARD_RATIO)):^{width}}")
+    print(f"{'Run date : ' + datetime.today().strftime('%d %b %Y'):^{width}}")
+    print("=" * width)
+
+    print("\n  Fetching data ...\n")
+    all_tickers = [NIFTY_TICKER] + list(STOCKS.keys())
+    raw         = fetch_all(all_tickers)
+
+    if NIFTY_TICKER not in raw:
+        print("\n  ERROR: Could not fetch Nifty data. Aborting.")
+        return
+
+    nifty_df   = add_indicators(raw[NIFTY_TICKER])
+    stock_data = {t: add_indicators(df) for t, df in raw.items() if t != NIFTY_TICKER}
+
+    print(f"\n  {len(stock_data)}/{len(STOCKS)} stocks loaded.\n")
+
+    if not stock_data:
+        print("  No stock data available. Aborting.")
+        return
+
+    print("─" * width)
+    print(f"{'SHORT TRADE LOG':^{width}}")
+    print("─" * width)
+
+    trades, final_equity = run_backtest_short(nifty_df, stock_data)
+
+    if not trades:
+        print("\n  No short trades were generated in the backtest period.")
+        print("  Possible reasons:")
+        print("    - Market was bullish (Nifty above EMA50) most of the period.")
+        print("    - No stock formed a coil tight enough near lows to pass filter.")
+        print("    - Breakdown level was never triggered on the next bar.")
+        print()
+        return
+
+    print_summary_short(trades, final_equity)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="NSE Swing Trade Backtest")
     parser.add_argument(
         "--strategy",
-        default="long_breakout",
-        choices=["long_breakout"],
-        help="Strategy to backtest (default: long_breakout)",
+        required=True,
+        choices=["long_breakout", "short_breakout"],
+        help="Strategy to backtest: long_breakout or short_breakout",
     )
     args = parser.parse_args()
 
     # Strategy dispatch — add new strategies here as elif branches
     if args.strategy == "long_breakout":
         run_backtest_strategy()
+    elif args.strategy == "short_breakout":
+        run_backtest_strategy_short()
     else:
         print(f"Unknown strategy: {args.strategy}")
         raise SystemExit(1)

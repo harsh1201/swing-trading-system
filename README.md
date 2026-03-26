@@ -30,8 +30,9 @@ The system is modular and designed for easy extension:
 
 1.  **`screener.py`**: Daily live execution tool.
 2.  **`backtest.py`**: Strategy research and verification.
-3.  **`strategies/long_breakout.py`**: Core strategy logic (the "Brain").
-4.  **`config/settings.py`**: User-defined risk and system parameters.
+3.  **`strategies/long_breakout.py`**: Long-only breakout logic.
+4.  **`strategies/short_breakout.py`**: Short-side breakdown logic.
+5.  **`config/settings.py`**: User-defined risk and system parameters.
 
 👉 See the full [Architecture Documentation](docs/architecture.md) for more details.
 
@@ -45,15 +46,23 @@ pip install -r requirements.txt
 ```
 
 ### 2. **Run Screener**
-Identify today's top trade setups:
+Check today's trade setups for both directions:
 ```bash
-python screener.py
+# Long breakout strategy
+python screener.py --strategy long_breakout
+
+# Short breakdown strategy
+python screener.py --strategy short_breakout
 ```
 
 ### 3. **Run Backtest**
-Validate the historical performance:
+Validate strategy performance historically:
 ```bash
-python backtest.py
+# Long breakout strategy
+python backtest.py --strategy long_breakout
+
+# Short breakdown strategy
+python backtest.py --strategy short_breakout
 ```
 
 ---

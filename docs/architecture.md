@@ -25,9 +25,9 @@ The system is built as a set of modular Python scripts and configuration files, 
 -   **Features**: Supporting concurrent positions, risk-based position sizing, and sector caps.
 -   **Metrics**: Win rate, profit/loss (PnL), realized risk/reward (RR), and walk-forward validation.
 
-### 3. **Strategy Engine (`strategies/long_breakout.py`)**
--   **Purpose**: Single source of truth for strategy logic.
--   **Logic**: Contains the math for EMA crossovers, consolidation detection, volume surges, and scoring algorithms.
+### 3. **Strategy Engine (`strategies/`)**
+-   **`long_breakout.py`**: Single source of truth for long-only breakout logic (EMA crossovers, coil detection, volume surges).
+-   **`short_breakout.py`**: Mirrored logic for short-side breakdowns (price below EMA50, tight coils near lows).
 
 ### 4. **Data Layer (`data/`)**
 -   **`cache.py`**: Handles OHLCV data fetching (via Yahoo Finance) and local CSV caching.
@@ -47,6 +47,8 @@ graph TD
     F --> E
     G[strategies/long_breakout.py] --> D
     G --> E
+    K[strategies/short_breakout.py] --> D
+    K --> E
     H[config/settings.py] --> D
     H --> E
     D --> I[Console Output / Trade Cards]

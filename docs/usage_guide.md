@@ -10,12 +10,15 @@ The screener is designed for daily use to identify potential swing-trade setups 
 
 ### **Common Commands**
 ```bash
-# Run with default (breakout) strategy
-python screener.py
+# Run the long breakout strategy (mandatory flag)
+python screener.py --strategy long_breakout
+
+# Run the short breakdown strategy (mandatory flag)
+python screener.py --strategy short_breakout
 
 # Run in LIVE_MODE (cleaner output for daily use)
 # Note: Set LIVE_MODE = True in config/settings.py
-python screener.py --strategy breakout
+python screener.py --strategy long_breakout
 ```
 
 ### **Interpreting Results**
@@ -35,8 +38,11 @@ Use the backtester to validate the strategy across historical data before deploy
 
 ### **Common Commands**
 ```bash
-# Run the full breakout backtest
+# Run the full long_breakout backtest (default)
 python backtest.py
+
+# Run the short_breakout backtest
+python backtest.py --strategy short_breakout
 ```
 
 ### **Output Reports**
