@@ -30,6 +30,10 @@ The screener generates **Trade Cards** for identified setups. Each card includes
 -   **Overall Score**: A metric of quality (out of 100).
 -   **Volume Surge**: How much today's volume is above the 20-day average.
 
+In `LIVE_MODE`, the screener also outputs a compact execution summary at the bottom, printed in the following pipe-separated format:
+`SYMBOL | STRATEGY | SIGNAL DATE (DD-MM-YYYY) | Entry: X | SL: Y | Target: Z`
+This makes it easy to copy-paste the day's signals directly into your brokerage or a trading journal.
+
 ---
 
 ## 🧪 Backtesting Engine (`backtest.py`)
@@ -38,11 +42,14 @@ Use the backtester to validate the strategy across historical data before deploy
 
 ### **Common Commands**
 ```bash
-# Run the full long_breakout backtest (default)
-python backtest.py
+# Run the long breakout strategy backtest
+python backtest.py --strategy long_breakout
 
-# Run the short_breakout backtest
+# Run the short breakdown strategy backtest
 python backtest.py --strategy short_breakout
+
+# Export completed trades (including entry_date and exit_date) to CSV
+python backtest.py --strategy long_breakout --export
 ```
 
 ### **Output Reports**

@@ -22,7 +22,7 @@ The system is built as a set of modular Python scripts and configuration files, 
 
 ### 2. **Backtester (`backtest.py`)**
 -   **Purpose**: Simulates historical trading using the same strategy logic as the screener.
--   **Features**: Supporting concurrent positions, risk-based position sizing, and sector caps.
+-   **Features**: Supporting concurrent positions, risk-based position sizing, sector caps, and CSV trade export (`--export`).
 -   **Metrics**: Win rate, profit/loss (PnL), realized risk/reward (RR), and walk-forward validation.
 
 ### 3. **Strategy Engine (`strategies/`)**

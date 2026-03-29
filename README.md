@@ -63,6 +63,9 @@ python backtest.py --strategy long_breakout
 
 # Short breakdown strategy
 python backtest.py --strategy short_breakout
+
+# Export completed trades to CSV (optional)
+python backtest.py --strategy long_breakout --export
 ```
 
 ---

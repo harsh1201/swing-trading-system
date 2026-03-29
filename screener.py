@@ -108,6 +108,8 @@ class MarketRegimeInfo(TypedDict):
 class ScreenerSetup(TypedDict):
     name: str
     ticker: str
+    strategy: str
+    signal_date: str
     trend: TrendResult
     cons: ConsolidationResult
     setup: TradeSetupResult
@@ -121,7 +123,7 @@ class ScreenerSetup(TypedDict):
 def fetch_data(
     ticker:  str,
     days:    int  = SCREENER_DAYS,
-    refresh: bool = False,
+    refresh: bool = True,
 ) -> pd.DataFrame | None:
     """
     Return `days` of daily OHLCV data.  Delegates to data.cache so the first
@@ -358,20 +360,14 @@ def print_execution_summary(
 
     # ── Quick reference table ──────────────────────────────────────────────────
     print()
-    print(f"  {'#':<3}  {'Ticker':<16}  {'Entry':>8}  {'Stop':>8}  "
-          f"{'Target':>8}  {'Risk%':>6}  {'Score':>6}")
     print("  " + "─" * (width - 2))
     for i, s in enumerate(top_n, 1):
         sp = s["setup"]
-        sc = s["score"]
-        print(
-            f"  {i:<3}  {s['ticker']:<16}  "
-            f"{sp['entry']:>8,.0f}  "
-            f"{sp['stop_loss']:>8,.0f}  "
-            f"{sp['target']:>8,.0f}  "
-            f"{sp['risk_pct']:>5.1f}%  "
-            f"{sc['total']:>6.1f}"
+        output_line = (
+            f"{s['ticker']} | {s.get('strategy', 'breakout')} | {s.get('signal_date', 'N/A')} | "
+            f"Entry: {sp['entry']} | SL: {sp['stop_loss']} | Target: {sp['target']}"
         )
+        print(f"  {output_line}")
 
     # ── Capital allocation suggestion ──────────────────────────────────────────
     print()
@@ -407,7 +403,7 @@ def run_screener() -> None:
     gap_pct_str = f"{int((GAP_UP_THRESHOLD - 1) * 100)}%"
     print(f"{'Stage 3 : Risk < ' + str(MAX_RISK_PCT) + '%  |  Vol > ' + str(VOLUME_MIN_RATIO) + 'x  |  No gap-up > ' + gap_pct_str + '  |  RR 1:' + str(int(REWARD_RATIO)):^{width}}")
     print(f"{'Stage 3d: Earnings blackout (' + str(EARNINGS_LOOKBACK_DAYS) + 'd / ' + str(EARNINGS_LOOKAHEAD_DAYS) + 'd)':^{width}}")
-    print(f"{'Date : ' + today.strftime('%d %b %Y  %H:%M'):^{width}}")
+    print(f"{'Date : ' + today.strftime('%d-%m-%Y  %H:%M'):^{width}}")
     print(f"{'Universe : ' + str(total) + ' stocks':^{width}}")
     print("=" * width)
 
@@ -561,9 +557,13 @@ def run_screener() -> None:
                   f"vol {vol['surge_ratio']:.2f}x  "
                   f"open {gap['gap_pct']:+.2f}%")
 
+        signal_date = df.index[-1].strftime("%d-%m-%Y") if hasattr(df.index[-1], "strftime") else str(df.index[-1])
+
         final_setups.append({
             "name":   name,
             "ticker": ticker,
+            "strategy": "breakout",
+            "signal_date": signal_date,
             "trend":  trend,
             "cons":   coil,
             "setup":  setup,
@@ -816,20 +816,14 @@ def print_execution_summary_short(
         return
 
     print()
-    print(f"  {'#':<3}  {'Ticker':<16}  {'Entry':>8}  {'Stop':>8}  "
-          f"{'Target':>8}  {'Risk%':>6}  {'Score':>6}")
     print("  " + "─" * (width - 2))
     for i, s in enumerate(top_n, 1):
         sp = s["setup"]
-        sc = s["score"]
-        print(
-            f"  {i:<3}  {s['ticker']:<16}  "
-            f"{sp['entry']:>8,.0f}  "
-            f"{sp['stop_loss']:>8,.0f}  "
-            f"{sp['target']:>8,.0f}  "
-            f"{sp['risk_pct']:>5.1f}%  "
-            f"{sc['total']:>6.1f}"
+        output_line = (
+            f"{s['ticker']} | {s.get('strategy', 'short_breakout')} | {s.get('signal_date', 'N/A')} | "
+            f"Entry: {sp['entry']} | SL: {sp['stop_loss']} | Target: {sp['target']}"
         )
+        print(f"  {output_line}")
 
     print()
     print(f"  Capital at risk    :  {total_risk:.1f}% of portfolio"
@@ -862,7 +856,7 @@ def run_screener_short() -> None:
     gap_pct_str = f"{int((GAP_UP_THRESHOLD - 1) * 100)}%"
     print(f"{'Stage 3 : Risk < ' + str(MAX_RISK_PCT) + '%  |  Vol > ' + str(VOLUME_MIN_RATIO) + 'x  |  No gap-down > ' + gap_pct_str + '  |  RR 1:' + str(int(REWARD_RATIO)):^{width}}")
     print(f"{'Stage 3d: Earnings blackout (' + str(EARNINGS_LOOKBACK_DAYS) + 'd / ' + str(EARNINGS_LOOKAHEAD_DAYS) + 'd)':^{width}}")
-    print(f"{'Date : ' + today.strftime('%d %b %Y  %H:%M'):^{width}}")
+    print(f"{'Date : ' + today.strftime('%d-%m-%Y  %H:%M'):^{width}}")
     print(f"{'Universe : ' + str(total) + ' stocks':^{width}}")
     print("=" * width)
 
@@ -1015,9 +1009,13 @@ def run_screener_short() -> None:
                   f"vol {vol['surge_ratio']:.2f}x  "
                   f"open {gap['gap_pct']:+.2f}%")
 
+        signal_date = df.index[-1].strftime("%d-%m-%Y") if hasattr(df.index[-1], "strftime") else str(df.index[-1])
+
         final_setups.append({
             "name":   name,
             "ticker": ticker,
+            "strategy": "short_breakout",
+            "signal_date": signal_date,
             "trend":  trend,
             "cons":   coil,
             "setup":  setup,

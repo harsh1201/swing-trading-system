@@ -281,10 +281,11 @@ Position Size = (1% capital) / (Entry - SL)
 ### Step 8 — Journal
 
 Track:
-- Entry
-- Exit
-- Exit reason:
-  - SL / BE / Trail / Target
+- Entry Date & Price
+- Exit Date & Price
+- Exit reason (SL / BE / Trail / Target)
+
+👉 Note: You can use `python backtest.py --strategy <strategy> --export` to automatically generate a CSV journal of all historical trades, complete with specific entry and exit dates.
 
 ---
 

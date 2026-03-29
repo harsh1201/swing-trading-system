@@ -589,7 +589,7 @@ def main() -> None:
     print(f"{'Stage 2 : Coil  (range < ' + str(MAX_RANGE_PCT) + '%, near high < ' + str(NEAR_HIGH_PCT) + '%)':^{width}}")
     gap_pct_str = f"{int((GAP_UP_THRESHOLD - 1) * 100)}%"
     print(f"{'Stage 3 : Risk < ' + str(MAX_RISK_PCT) + '%  |  Vol > ' + str(VOLUME_SURGE_FACTOR) + 'x  |  No gap-up > ' + gap_pct_str + '  |  RR 1:' + str(int(REWARD_RATIO)):^{width}}")
-    print(f"{'Date : ' + datetime.today().strftime('%d %b %Y  %H:%M'):^{width}}")
+    print(f"{'Date : ' + datetime.today().strftime('%d-%m-%Y  %H:%M'):^{width}}")
     print(f"{'Universe : ' + str(total) + ' stocks':^{width}}")
     print("=" * width)
 

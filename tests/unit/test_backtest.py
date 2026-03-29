@@ -31,12 +31,12 @@ def test_close_logic():
     trade: Trade = {
         "ticker": "T", "name": "T", "sector": "S", "df": pd.DataFrame(),
         "entry_price": 100, "effective_entry": 101, "stop_loss": 90, "target": 120,
-        "active_sl": 90, "be_hit": False, "nifty_entry_idx": 1, "signal_date": "2023-01-01",
+        "active_sl": 90, "be_hit": False, "nifty_entry_idx": 1, "signal_date": "01-01-2023",
         "qty": 10, "score": 80, "volume_ratio": 2
     }
     closed = []
-    _close(trade, 120, "win", 10, closed)
-    _close_short(trade, 80, "win", 10, closed)
+    _close(trade, 120, "win", 10, closed, "05-01-2023")
+    _close_short(trade, 80, "win", 10, closed, "05-01-2023")
     assert len(closed) == 2
 
 def test_period_stats():
@@ -98,7 +98,7 @@ def test_engines(monkeypatch):
     run_backtest_short(ndf, sdata)
 
 def test_summaries(capsys):
-    ts = [{"ticker": "T", "signal_date": "2023-01-01", "outcome": "win", "pnl_abs": 100, "pnl_pct": 2.0, "bars_held": 5, "volume_ratio": 2.0, "name": "T", "score": 80}]
+    ts = [{"ticker": "T", "signal_date": "01-01-2023", "exit_date": "05-01-2023", "outcome": "win", "pnl_abs": 100, "pnl_pct": 2.0, "bars_held": 5, "volume_ratio": 2.0, "name": "T", "score": 80}]
     print_summary(ts, 1100)
     print_summary_short(ts, 1100)
     print_year_breakdown(ts)
