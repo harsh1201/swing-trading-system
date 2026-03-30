@@ -89,5 +89,9 @@ def fetch_ohlcv(
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
 
+    # Remove duplicate columns (yfinance can produce them after flattening)
+    if df.columns.duplicated().any():
+        df = df.loc[:, ~df.columns.duplicated()]
+
     df.to_csv(filepath)
     return df

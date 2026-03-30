@@ -281,7 +281,7 @@ STOCKS: dict[str, str] = {
     "VOLTAS.NS":      "Voltas",
     "CROMPTON.NS":    "Crompton Greaves",
     "AMBER.NS":       "Amber Enterprises",
-    "CUMMINS.NS":     "Cummins India",
+    "CUMMINSIND.NS":  "Cummins India",
     "SCHAEFFLER.NS":  "Schaeffler India",
     "TIMKEN.NS":      "Timken India",
     "SKFINDIA.NS":    "SKF India",

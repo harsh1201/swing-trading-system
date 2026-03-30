@@ -360,14 +360,20 @@ def print_execution_summary(
 
     # ── Quick reference table ──────────────────────────────────────────────────
     print()
+    print(f"  {'#':<3}  {'Ticker':<16}  {'Entry':>8}  {'Stop':>8}  "
+          f"{'Target':>8}  {'Risk%':>6}  {'Score':>6}")
     print("  " + "─" * (width - 2))
     for i, s in enumerate(top_n, 1):
         sp = s["setup"]
-        output_line = (
-            f"{s['ticker']} | {s.get('strategy', 'breakout')} | {s.get('signal_date', 'N/A')} | "
-            f"Entry: {sp['entry']} | SL: {sp['stop_loss']} | Target: {sp['target']}"
+        sc = s["score"]
+        print(
+            f"  {i:<3}  {s['ticker']:<16}  "
+            f"{sp['entry']:>8,.0f}  "
+            f"{sp['stop_loss']:>8,.0f}  "
+            f"{sp['target']:>8,.0f}  "
+            f"{sp['risk_pct']:>5.1f}%  "
+            f"{sc['total']:>6.1f}"
         )
-        print(f"  {output_line}")
 
     # ── Capital allocation suggestion ──────────────────────────────────────────
     print()
@@ -474,14 +480,26 @@ def run_screener() -> None:
             print(f"  [{n:>3}/{total}]  {name:<26} ({ticker:<16})  ",
                   end="", flush=True)
 
-        df = fetch_data(ticker)
+        try:
+            df = fetch_data(ticker)
+        except Exception as exc:
+            if not LIVE_MODE:
+                print(f"FETCH ERROR: {exc}")
+            skipped += 1
+            continue
         if df is None:
             if not LIVE_MODE:
                 print("NO DATA")
             skipped += 1
             continue
 
-        df = add_indicators(df)
+        try:
+            df = add_indicators(df)
+        except Exception as exc:
+            if not LIVE_MODE:
+                print(f"INDICATOR ERROR: {exc}")
+            skipped += 1
+            continue
         scanned += 1
 
         # Price floor — skip penny stocks
@@ -816,14 +834,20 @@ def print_execution_summary_short(
         return
 
     print()
+    print(f"  {'#':<3}  {'Ticker':<16}  {'Entry':>8}  {'Stop':>8}  "
+          f"{'Target':>8}  {'Risk%':>6}  {'Score':>6}")
     print("  " + "─" * (width - 2))
     for i, s in enumerate(top_n, 1):
         sp = s["setup"]
-        output_line = (
-            f"{s['ticker']} | {s.get('strategy', 'short_breakout')} | {s.get('signal_date', 'N/A')} | "
-            f"Entry: {sp['entry']} | SL: {sp['stop_loss']} | Target: {sp['target']}"
+        sc = s["score"]
+        print(
+            f"  {i:<3}  {s['ticker']:<16}  "
+            f"{sp['entry']:>8,.0f}  "
+            f"{sp['stop_loss']:>8,.0f}  "
+            f"{sp['target']:>8,.0f}  "
+            f"{sp['risk_pct']:>5.1f}%  "
+            f"{sc['total']:>6.1f}"
         )
-        print(f"  {output_line}")
 
     print()
     print(f"  Capital at risk    :  {total_risk:.1f}% of portfolio"
@@ -926,14 +950,26 @@ def run_screener_short() -> None:
             print(f"  [{n:>3}/{total}]  {name:<26} ({ticker:<16})  ",
                   end="", flush=True)
 
-        df = fetch_data(ticker)
+        try:
+            df = fetch_data(ticker)
+        except Exception as exc:
+            if not LIVE_MODE:
+                print(f"FETCH ERROR: {exc}")
+            skipped += 1
+            continue
         if df is None:
             if not LIVE_MODE:
                 print("NO DATA")
             skipped += 1
             continue
 
-        df = add_indicators(df)
+        try:
+            df = add_indicators(df)
+        except Exception as exc:
+            if not LIVE_MODE:
+                print(f"INDICATOR ERROR: {exc}")
+            skipped += 1
+            continue
         scanned += 1
 
         # Price floor — skip penny stocks
