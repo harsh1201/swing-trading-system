@@ -59,6 +59,7 @@ Trend-following swing trading system based on:
 Move SL → Entry ONLY IF:
 - Price reaches **≥ 1.5R (intraday high)**
 - AND daily **close > entry**
+- 🛡️ *Entry-Bar Guard*: This rule is **skipped on the day of entry** to prevent premature exits due to initial volatility ("same-bar traps"). Trades must have at least one day to develop.
 
 ---
 
@@ -68,6 +69,7 @@ Move SL → Entry ONLY IF:
   - **Close < EMA20**
 - Exit executed at:
   - **Next day open**
+- 🛡️ *Entry-Bar Guard*: Like the Breakeven rule, the trailing stop is **skipped on the day of entry**. Only hard Stop Loss and Target act as exits on Day 1.
 
 ---
 

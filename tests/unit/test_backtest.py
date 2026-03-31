@@ -117,5 +117,44 @@ def test_wrappers(monkeypatch):
 
 def test_main(monkeypatch):
     monkeypatch.setattr("sys.argv", ["backtest.py", "--strategy", "long_breakout"])
-    monkeypatch.setattr("backtest.run_backtest_strategy", lambda: None)
+    monkeypatch.setattr("backtest.run_backtest_strategy", lambda **kw: None)
     main()
+
+def test_same_bar_protection(monkeypatch):
+    # Verify BE and Trail rules are skipped on the entry bar
+    monkeypatch.setattr("backtest.BACKTEST_DAYS", 30)
+    monkeypatch.setattr("backtest.EMA_LONG", 5)
+    
+    d = pd.date_range("2023-01-01", periods=30)
+    ndf = pd.DataFrame({"Close": [100.0]*30}, index=d)
+    sdf = pd.DataFrame({
+        "Close": [100.0]*30, "High": [100.0]*30, "Low": [100.0]*30, "Open": [100.0]*30, "Volume": [1000]*30, "EMA20": [90.0]*30
+    }, index=d)
+    sdata = {"T": sdf}
+    monkeypatch.setattr("backtest.get_market_regime", lambda n, i, s: (True, "STRONG_BULL", 50))
+    
+    # scan candidate mock -> trigger trade on index 15
+    def mock_scan(s, d_cur):
+        if d_cur == d[15]:
+            return [{"ticker": "T", "name": "T", "idx": 15, "df": s["T"], "entry": 105.0, "stop_loss": 95.0, "target": 125.0, "score": 80, "volume_ratio": 2}]
+        return []
+    monkeypatch.setattr("backtest.scan_candidates", mock_scan)
+    
+    # On scan bar (idx=15)
+    sdf.iloc[15, 0:6] = [100.0, 102.0, 99.0, 100.0, 1000.0, 90.0]
+
+    # ENTRY BAR (idx=16): Next bar must close above entry.
+    # We spike High to 121 to conditionally trigger BE rule: (high >= entry + 1.5R = 120)
+    # But because it's the entry bar, BE manager should skip it.
+    sdf.iloc[16, 0:6] = [106.0, 121.0, 105.0, 106.0, 1000.0, 92.0]
+    
+    # NEXT BAR (idx=17): Price drops to 100 which is > 95 SL but < 105 BE level.
+    # If BE was hit on idx=16, this would incorrectly be a breakeven exit.
+    sdf.iloc[17, 0:6] = [100.0, 100.0, 100.0, 100.0, 1000.0, 93.0]
+
+    # TARGET BAR (idx=18): Price hits target
+    sdf.iloc[18, 0:6] = [130.0, 131.0, 125.0, 126.0, 1000.0, 110.0]
+    
+    closed_trades, eq = run_backtest(ndf, sdata)
+    assert len(closed_trades) == 1
+    assert closed_trades[0]["outcome"] == "win"
