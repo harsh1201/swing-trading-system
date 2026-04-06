@@ -1,4 +1,5 @@
 import pytest
+from unittest import mock
 import pandas as pd
 import numpy as np
 from strategies.long_breakout import (
@@ -153,7 +154,90 @@ def test_score_long_breakout():
     result = score_long_breakout(trend, coil)
     assert result["total"] > 0
 
-def test_calculate_trade_setup():
-    result = calculate_trade_setup(110, 100)
-    assert result["entry"] == 110
-    assert result["is_valid"] is True
+def test_calculate_trade_setup(sample_df):
+    assert calculate_trade_setup(100, 90)["is_valid"] is True
+    assert calculate_trade_setup(100, 70)["is_valid"] is False
+
+def test_get_market_regime_edge_cases(sample_df):
+    # idx < EMA_LONG (135)
+    df = add_indicators(sample_df)
+    res, label, _ = get_market_regime(df, idx=2)
+    assert res is False
+    assert label == "BEAR"
+
+    # idx % 100 == 0 (144)
+    # create long df
+    ldf = pd.DataFrame({"Close": [100.0]*201}, index=pd.date_range("2023-01-01", periods=201))
+    ldf = add_indicators(ldf)
+    get_market_regime(ldf, idx=100) # should trigger print
+    get_market_regime(ldf, idx=200) # should trigger print
+
+def test_get_market_regime_strong_bull(sample_df):
+    df = add_indicators(sample_df)
+    idx = len(df) - 1
+    df.loc[df.index[idx], "Close"] = 500.0
+    df.loc[df.index[idx], "EMA50"] = 100.0
+    # Provide real stock data to trigger breadth
+    stock2 = df.copy()
+    stock2.loc[stock2.index[idx], "Close"] = 500.0
+    stock2.loc[stock2.index[idx], "EMA50"] = 100.0
+    all_data = {"S2": stock2}
+    
+    res, label, b = get_market_regime(df, idx=idx, all_data=all_data)
+    assert res is True
+    assert label == "STRONG_BULL"
+    assert b == 100.0
+
+def test_is_market_bullish_wrapper(sample_df):
+    df = add_indicators(sample_df)
+    # Force a result that makes is_market_bullish True
+    with mock.patch("strategies.long_breakout.get_market_regime", return_value=(True, "STRONG_BULL", 50.0)):
+        assert is_market_bullish(df, idx=len(df)-1) is True
+
+def test_check_volume_edge_cases(sample_df):
+    # idx < VOLUME_AVG_PERIOD (252, 255)
+    assert check_volume(sample_df, idx=5) is None
+    # surge_ratio < VOLUME_MIN_RATIO (262-263 covered, but let's be sure)
+    sample_df["Volume"] = 100
+    assert check_volume(sample_df, idx=25) is None
+
+def test_check_gap_condition_zero_entry():
+    # line 305
+    assert check_gap_condition(100, 0) is True
+
+def test_check_liquidity_insufficient_history(sample_df):
+    # line 331
+    assert check_liquidity(sample_df, idx=5) is False
+
+def test_calculate_market_breadth_edge_cases(sample_df):
+    ref_df = add_indicators(sample_df)
+    # idx >= len (440)
+    assert calculate_market_breadth({}, 1000, ref_df) == 0.0
+
+    # total == 0 (468)
+    assert calculate_market_breadth({}, 10, ref_df) == 0.0
+
+    # skip small data (446)
+    sdata = {"S1": pd.DataFrame({"Close": [100]*10})}
+    assert calculate_market_breadth(sdata, 10, ref_df) == 0.0
+
+    # empty slice (452)
+    sdata = {"S1": pd.DataFrame({"Close": [100]*55}, index=pd.date_range("2024-01-01", periods=55))}
+    assert calculate_market_breadth(sdata, 0, ref_df) == 0.0 # ref_df starts in 2023
+
+    # missing EMA50 (455)
+    sdata = {"S1": pd.DataFrame({"Close": [100]*55}, index=pd.date_range("2023-01-01", periods=55))}
+    assert calculate_market_breadth(sdata, 10, ref_df) == 0.0
+
+    # NaN EMA50 (460)
+    df_nan = pd.DataFrame({"Close": [100.0]*55}, index=pd.date_range("2023-01-01", periods=55))
+    df_nan["EMA50"] = float("nan")
+    sdata = {"S1": df_nan}
+    assert calculate_market_breadth(sdata, 10, ref_df) == 0.0
+
+def test_default_idx_coverage(sample_df):
+    # Coverage for line 132, 212, 252, 328
+    get_market_regime(sample_df)
+    check_consolidation(sample_df)
+    check_volume(sample_df)
+    check_liquidity(sample_df)

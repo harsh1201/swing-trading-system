@@ -1,0 +1,14 @@
+{
+  "total": 74,
+  "files": {
+    "backtest.py": 84,
+    "screener.py": 73,
+    "strategies/long_breakout.py": 91,
+    "strategies/short_breakout.py": 91,
+    "data/cache.py": 77,
+    "data/earnings.py": 85,
+    "config/settings.py": 100,
+    "config/stocks.py": 100
+  },
+  "timestamp": "2026-04-06T20:29:06.220742"
+}
