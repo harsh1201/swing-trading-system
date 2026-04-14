@@ -30,11 +30,12 @@ Pipeline
 
 import sys
 import argparse
-from typing import TypedDict
+import os
+from typing import TypedDict, List
 
 import pandas as pd
 from datetime import datetime, timedelta
-from data.cache    import fetch_ohlcv
+from data.cache    import fetch_ohlcv, DataCache
 from data.earnings import get_earnings_dates
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -95,6 +96,18 @@ from strategies.short_breakout import (
 
 
 # ── Type definitions ─────────────────────────────────────────────────────────
+
+class PortfolioTrade(TypedDict):
+    ticker: str
+    name: str
+    strategy: str  # "long_breakout" or "short_breakout"
+    status: str    # "PENDING", "ACTIVE", "CLOSED"
+    entry: float
+    stop_loss: float
+    target: float
+    date_added: str
+    exit_date: str
+    outcome: str
 
 class MarketRegimeInfo(TypedDict):
     close: float | None
@@ -389,6 +402,125 @@ def print_execution_summary(
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
+# ── Portfolio Management ──────────────────────────────────────────────────────
+
+def _get_portfolio_cache() -> DataCache:
+    """Return the DataCache instance for the portfolio."""
+    # Place it in the same data folder as CSVs
+    data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+    return DataCache(os.path.join(data_dir, "portfolio.json"))
+
+def load_portfolio() -> List[PortfolioTrade]:
+    """Load tracked trades from disk."""
+    cache = _get_portfolio_cache()
+    data = cache.load("portfolio")
+    return data["trades"] if data and "trades" in data else []
+
+def save_portfolio(trades: List[PortfolioTrade]) -> None:
+    """Save tracked trades to disk."""
+    cache = _get_portfolio_cache()
+    cache.save("portfolio", {"trades": trades})
+
+def update_portfolio() -> None:
+    """
+    Fetch latest prices for all tracked trades and update their status.
+    Prints a summary of active/pending trades.
+    """
+    trades = load_portfolio()
+    if not trades:
+        return
+
+    print("\n" + "=" * 72)
+    print(f"{'CURRENT PORTFOLIO TRACKER':^72}")
+    print("=" * 72)
+    
+    updated_trades = []
+    
+    col = f"{'Ticker':<12} {'Status':<10} {'Entry':>8} {'SL':>8} {'Target':>9} {'Current':>8} {'Update'}"
+    print(f"  {col}")
+    print(f"  {'-' * len(col)}")
+
+    for t in trades:
+        # Fetch latest data
+        df = fetch_ohlcv(t["ticker"], days=30, refresh=True)
+        if df is None or df.empty:
+            updated_trades.append(t)
+            print(f"  {t['ticker']:<12} {t['status']:<10} [NO DATA]")
+            continue
+
+        df = add_indicators(df)
+        last_row = df.iloc[-1]
+        curr_close = float(last_row["Close"])
+        curr_high = float(last_row["High"])
+        curr_low = float(last_row["Low"])
+        
+        status_change = ""
+        
+        if t["status"] == "PENDING":
+            if t["strategy"] == "long_breakout":
+                if curr_high >= t["entry"]:
+                    t["status"] = "ACTIVE"
+                    status_change = "→ TRIGGERED ACTIVE"
+            elif t["strategy"] == "short_breakout":
+                if curr_low <= t["entry"]:
+                    t["status"] = "ACTIVE"
+                    status_change = "→ TRIGGERED ACTIVE"
+        
+        if t["status"] == "ACTIVE":
+            if t["strategy"] == "long_breakout":
+                if curr_low <= t["stop_loss"]:
+                    t["status"] = "CLOSED"
+                    t["outcome"] = "LOSS"
+                    t["exit_date"] = df.index[-1].strftime("%d-%m-%Y")
+                    status_change = "→ HIT STOP LOSS (CLOSED)"
+                elif curr_high >= t["target"]:
+                    t["status"] = "CLOSED"
+                    t["outcome"] = "WIN"
+                    t["exit_date"] = df.index[-1].strftime("%d-%m-%Y")
+                    status_change = "→ HIT TARGET (CLOSED)"
+            elif t["strategy"] == "short_breakout":
+                if curr_high >= t["stop_loss"]:
+                    t["status"] = "CLOSED"
+                    t["outcome"] = "LOSS"
+                    t["exit_date"] = df.index[-1].strftime("%d-%m-%Y")
+                    status_change = "→ HIT STOP LOSS (CLOSED)"
+                elif curr_low <= t["target"]:
+                    t["status"] = "CLOSED"
+                    t["outcome"] = "WIN"
+                    t["exit_date"] = df.index[-1].strftime("%d-%m-%Y")
+                    status_change = "→ HIT TARGET (CLOSED)"
+
+        print(f"  {t['ticker']:<12} {t['status']:<10} {t['entry']:>8.2f} {t['stop_loss']:>8.2f} {t['target']:>9.2f} {curr_close:>8.2f} {status_change}")
+        
+        if t["status"] != "CLOSED":
+            updated_trades.append(t)
+
+    save_portfolio(updated_trades)
+    print("=" * 72 + "\n")
+
+def add_to_portfolio(ticker: str, name: str, strategy: str, entry: float, sl: float, target: float) -> None:
+    """Add a new setup to the portfolio if it is not already tracked."""
+    trades = load_portfolio()
+    
+    # Avoid duplicates
+    if any(t["ticker"] == ticker and t["strategy"] == strategy for t in trades):
+        return
+        
+    new_trade: PortfolioTrade = {
+        "ticker": ticker,
+        "name": name,
+        "strategy": strategy,
+        "status": "PENDING",
+        "entry": entry,
+        "stop_loss": sl,
+        "target": target,
+        "date_added": datetime.today().strftime("%d-%m-%Y"),
+        "exit_date": "",
+        "outcome": ""
+    }
+    trades.append(new_trade)
+    save_portfolio(trades)
+
 def run_screener() -> None:
     """Execute the full scan and print results."""
     width   = 72
@@ -413,7 +545,11 @@ def run_screener() -> None:
     print(f"{'Universe : ' + str(total) + ' stocks':^{width}}")
     print("=" * width)
 
-    # ── Stage 0: Market regime ────────────────────────────────────────────────
+    # ── Update tracked trades first ───────────────────────────────────────────
+    update_portfolio()
+
+    # ── Stage 0 : Market regime ──────────────────────────────────────────────────
+
     print(f"\n  Checking market regime ({NIFTY_TICKER}) ...", end="  ", flush=True)
     regime = check_market_regime()
     print("done.\n")
@@ -576,6 +712,9 @@ def run_screener() -> None:
                   f"open {gap['gap_pct']:+.2f}%")
 
         signal_date = df.index[-1].strftime("%d-%m-%Y") if hasattr(df.index[-1], "strftime") else str(df.index[-1])
+        
+        # Track setup in portfolio
+        add_to_portfolio(ticker, name, "long_breakout", setup["entry"], setup["stop_loss"], setup["target"])
 
         final_setups.append({
             "name":   name,
@@ -884,7 +1023,11 @@ def run_screener_short() -> None:
     print(f"{'Universe : ' + str(total) + ' stocks':^{width}}")
     print("=" * width)
 
-    # ── Stage 0: Market regime (bearish) ─────────────────────────────────────
+    # ── Update tracked trades first ───────────────────────────────────────────
+    update_portfolio()
+
+    # ── Stage 0 : Market regime ──────────────────────────────────────────────────
+
     print(f"\n  Checking market regime ({NIFTY_TICKER}) ...", end="  ", flush=True)
     regime = check_market_regime_bearish()
     print("done.\n")
@@ -1046,6 +1189,9 @@ def run_screener_short() -> None:
                   f"open {gap['gap_pct']:+.2f}%")
 
         signal_date = df.index[-1].strftime("%d-%m-%Y") if hasattr(df.index[-1], "strftime") else str(df.index[-1])
+
+        # Track setup in portfolio
+        add_to_portfolio(ticker, name, "short_breakout", setup["entry"], setup["stop_loss"], setup["target"])
 
         final_setups.append({
             "name":   name,
