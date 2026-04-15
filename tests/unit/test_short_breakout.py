@@ -1,4 +1,5 @@
 import pytest
+from unittest import mock
 import pandas as pd
 import numpy as np
 from strategies.short_breakout import (
@@ -8,7 +9,8 @@ from strategies.short_breakout import (
     check_gap_down,
     _trend_score_short,
     score_short_breakout,
-    calculate_trade_setup_short
+    calculate_trade_setup_short,
+    is_market_bearish,
 )
 from strategies.long_breakout import add_indicators
 
@@ -90,6 +92,57 @@ def test_score_short_breakout():
     result = score_short_breakout(trend, coil)
     assert "total" in result
     assert result["total"] > 0
+
+def test_get_market_regime_short_edge_cases(sample_df_short):
+    # idx == -1 (127)
+    df = sample_df_short
+    res, label, _ = get_market_regime_short(df, idx=-1)
+    assert label is not None
+
+    # idx < EMA_LONG (130)
+    res, label, _ = get_market_regime_short(df, idx=2)
+    assert res is False
+    assert label == "BULL"
+
+    # idx % 100 == 0 (139)
+    ldf = pd.DataFrame({"Close": [100.0]*101}, index=pd.date_range("2023-01-01", periods=101))
+    ldf = add_indicators(ldf)
+    get_market_regime_short(ldf, idx=100)
+
+def test_early_bear_logic(sample_df_short):
+    # Condition B: close < ema20 and ema20 < ema20_prev and breadth <= 70 (146-150)
+    df = sample_df_short
+    idx = len(df) - 1
+    # Force condition A to be false (close < ema50)
+    df.loc[df.index[idx], "EMA50"] = 40 # EMA50 below 50
+    df.loc[df.index[idx], "Close"] = 50 # Above EMA50 (No Strong Bear)
+    df.loc[df.index[idx], "EMA20"] = 60 # Above Close (Early Bear)
+    df.loc[df.index[idx-5], "EMA20"] = 80 # Falling EMA20
+    
+    with mock.patch("strategies.short_breakout.calculate_market_breadth", return_value=50.0):
+        res, label, _ = get_market_regime_short(df, idx=idx)
+        assert res is True
+        assert label == "EARLY_BEAR"
+
+def test_is_market_bearish_wrapper(sample_df_short):
+    df = sample_df_short
+    # Condition: close < ema50 and breadth <= 60
+    df.loc[df.index[-1], "Close"] = 50
+    with mock.patch("strategies.short_breakout.calculate_market_breadth", return_value=50.0):
+        assert is_market_bearish(df, idx=len(df)-1) is True
+
+def test_get_market_regime_short_bull_regime(sample_df_short):
+    # Coverage for line 152 (BULL)
+    df = sample_df_short
+    idx = len(df) - 1
+    df.loc[df.index[idx], "Close"] = 500 # Way above EMA50, not early bear
+    res, label, _ = get_market_regime_short(df, idx=idx)
+    assert res is False
+    assert label == "BULL"
+
+def test_check_consolidation_short_default_idx(sample_df_short):
+    # Coverage for line 211
+    check_consolidation_short(sample_df_short)
 
 def test_calculate_trade_setup_short():
     result = calculate_trade_setup_short(110, 100)

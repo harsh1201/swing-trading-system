@@ -95,3 +95,34 @@ def fetch_ohlcv(
 
     df.to_csv(filepath)
     return df
+
+import json
+
+class DataCache:
+    def __init__(self, filepath: str):
+        self.filepath = filepath
+
+    def save(self, key: str, data: dict):
+        try:
+            with open(self.filepath, 'r') as f:
+                cache_data = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            cache_data = {}
+        
+        cache_data[key] = data
+        with open(self.filepath, 'w') as f:
+            json.dump(cache_data, f)
+
+    def load(self, key: str) -> dict | None:
+        try:
+            with open(self.filepath, 'r') as f:
+                cache_data = json.load(f)
+            return cache_data.get(key)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return None
+
+    def clear(self):
+        try:
+            os.remove(self.filepath)
+        except FileNotFoundError:
+            pass
