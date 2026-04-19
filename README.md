@@ -6,7 +6,7 @@
 
 ## 🚀 Overview
 
-This repository provides a complete system for finding and backtesting breakout strategies in the Indian stock market. It combines **market regime filtering**, **tight consolidation (coils)**, and **volume analysis** to identify high-probability swing trading setups.
+This repository provides a complete system for finding and backtesting breakout strategies in the Indian stock market. It combines **tight consolidation (coils)**, **EMA trend filtering**, and **volume analysis** to identify high-probability swing trading setups.
 
 -   **Live Screener**: Automatically scan the NSE universe for daily trade setups.
 -   **Backtest Engine**: Rigorous historical validation with concurrent positions and risk management.
@@ -16,11 +16,12 @@ This repository provides a complete system for finding and backtesting breakout 
 
 ## ✨ Key Features
 
--   **Market Regime Filter**: Automatically stand aside in BEAR regimes (Nifty 50 < EMA50).
+-   **Trend-Following Breakout**: Trade breakouts from consolidation patterns (coils).
 -   **Precision Scanners**: Filter stocks based on custom trend, coil, and volume rules.
 -   **Risk-Defined Sizing**: Automatically calculates position sizes based on a 1% portfolio risk model.
 -   **Cost Modeling**: Real-world backtesting including slippage and transaction costs.
 -   **Walk-Forward Validation**: Built-in robustness testing across years of market data.
+-   **Discord Integration**: Auto-posts portfolio to Discord webhook.
 
 ---
 
@@ -83,8 +84,17 @@ python backtest.py --strategy long_breakout --export
 
 This system expects a **low win rate (~25%)** but achieves profitability through a **high Risk-to-Reward ratio (1:2)**. Success depends on:
 1.  **Discipline**: Never override the system.
-2.  **Consistency**: Execute every "GO" signal in BULL regimes.
+2.  **Manual Verification**: Verify market conditions before trading (regime filter is disabled).
 3.  **Risk Management**: Always respect the 1% risk per trade.
+
+---
+
+## ⚠️ Paper Trading Only
+
+**This system is for paper trading and backtesting ONLY.**
+- Use for research, strategy validation, and educational purposes
+- For live trading with real money, a reliable data API (Dhan API, Angel One API) is required
+- Yahoo Finance data can be delayed/unreliable
 
 ---
 

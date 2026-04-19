@@ -62,6 +62,15 @@ from config.settings import (
     RISK_PER_TRADE,
     MIN_AVG_TURNOVER,
     MIN_PRICE,
+    DEAD_TICKERS,
+    TICKER_ALIASES,
+    PENDING_EXPIRY_DAYS,
+    CLOSED_CLEANUP_DAYS,
+    MAX_ACTIVE_DAYS,
+    SCORE_WEIGHT_RISK,
+    SCORE_WEIGHT_RANGE,
+    SCORE_WEIGHT_TREND,
+    DISCORD_PORTFOLIO_WEBHOOK,
 )
 from strategies.long_breakout import (
     TrendResult,
@@ -106,8 +115,11 @@ class PortfolioTrade(TypedDict):
     stop_loss: float
     target: float
     date_added: str
+    entry_trigger_date: str  # When entry actually triggered (PENDING → ACTIVE)
     exit_date: str
     outcome: str
+    r_multiple: float  # Actual R achieved (negative for loss)
+    current_price: float  # Latest price for tracking
 
 class MarketRegimeInfo(TypedDict):
     close: float | None
@@ -131,7 +143,126 @@ class ScreenerSetup(TypedDict):
     score: ScoreResult
 
 
+# ── Discord Integration ─────────────────────────────────────────────────────────
+
+def post_to_discord(message: str, webhook_url: str) -> bool:
+    """Post a message to Discord via webhook. Returns True on success."""
+    if not webhook_url:
+        return False
+    
+    try:
+        import requests
+        if len(message) > 2000:
+            message = message[:1997] + "..."
+        response = requests.post(webhook_url, json={"content": message}, timeout=10)
+        return response.status_code == 204
+    except Exception:
+        return False
+
+
+def format_trade_row(t: dict) -> str:
+    """Format a single trade as a Discord message row."""
+    ticker = t["ticker"].replace(".NS", "")
+    direction = "LONG" if t.get("strategy") == "long_breakout" else "SHORT"
+    status_emoji = {"ACTIVE": "🟢", "PENDING": "⏳", "CLOSED": "✅"}.get(t["status"], "⚪")
+    
+    entry = t.get("entry", 0)
+    sl = t.get("stop_loss", 0)
+    target = t.get("target", 0)
+    curr_price = t.get("current_price", entry)
+    r_val = t.get("r_multiple", 0)
+    
+    entry_str = f"₹{entry:,.0f}" if entry else "-"
+    sl_str = f"₹{sl:,.0f}" if sl else "-"
+    target_str = f"₹{target:,.0f}" if target else "-"
+    curr_str = f"₹{curr_price:,.0f}" if curr_price else "-"
+    r_str = f"{r_val:+.2f}R" if r_val != 0 else "-"
+    
+    return f"{status_emoji} **{ticker}** [{direction}] `Entry:{entry_str} SL:{sl_str} Tgt:{target_str} Curr:{curr_str} R:{r_str}`"
+
+
+def format_portfolio_for_discord(trades: List[PortfolioTrade]) -> str:
+    """Format full portfolio with all trades as Discord messages."""
+    if not trades:
+        return "📭 **Portfolio is empty**"
+    
+    active = [t for t in trades if t["status"] == "ACTIVE"]
+    pending = [t for t in trades if t["status"] == "PENDING"]
+    closed = [t for t in trades if t["status"] == "CLOSED"]
+    
+    closed_wins = [t for t in closed if t.get("outcome") == "WIN"]
+    closed_losses = [t for t in closed if t.get("outcome") == "LOSS"]
+    
+    total_closed = len(closed)
+    win_count = len(closed_wins)
+    loss_count = len(closed_losses)
+    win_rate = (win_count / total_closed * 100) if total_closed > 0 else 0
+    
+    r_values = [t.get("r_multiple", 0) for t in closed if t.get("r_multiple", 0) != 0]
+    avg_r = sum(r_values) / len(r_values) if r_values else 0
+    total_r = sum(r_values) if r_values else 0
+    
+    long_active = len([t for t in active if t.get("strategy") == "long_breakout"])
+    short_active = len([t for t in active if t.get("strategy") == "short_breakout"])
+    
+    date_str = datetime.now().strftime("%d %b %Y, %H:%M")
+    
+    lines = []
+    
+    lines.append(f"📊 **SWING TRADING PORTFOLIO**")
+    lines.append(f"*{date_str}*")
+    lines.append("")
+    
+    lines.append(f"**═══ SUMMARY ═══**")
+    lines.append(f"🟢 Active: **{len(active)}** (L:{long_active} | S:{short_active})")
+    lines.append(f"⏳ Pending: **{len(pending)}**")
+    lines.append(f"✅ Closed: **{total_closed}** (W:{win_count} | L:{loss_count})")
+    if total_closed > 0:
+        lines.append(f"📈 Win Rate: **{win_rate:.1f}%** | Avg R: **{avg_r:+.2f}** | Total R: **{total_r:+.2f}R**")
+    lines.append("")
+    
+    if active:
+        lines.append(f"**═══ ACTIVE ({len(active)}) ═══**")
+        for t in active:
+            lines.append(format_trade_row(t))
+        lines.append("")
+    
+    if pending:
+        lines.append(f"**═══ PENDING ({len(pending)}) ═══**")
+        for t in pending:
+            lines.append(format_trade_row(t))
+        lines.append("")
+    
+    if closed:
+        lines.append(f"**═══ CLOSED ({len(closed)}) ═══**")
+        for t in closed[-10:]:
+            lines.append(format_trade_row(t))
+        if len(closed) > 10:
+            lines.append(f"_... and {len(closed) - 10} more_")
+    
+    return "\n".join(lines)
+
+
+def send_portfolio_to_discord(trades: List[PortfolioTrade]) -> None:
+    """Send portfolio summary to Discord if webhook is configured."""
+    if not DISCORD_PORTFOLIO_WEBHOOK:
+        return
+    
+    message = format_portfolio_for_discord(trades)
+    success = post_to_discord(message, DISCORD_PORTFOLIO_WEBHOOK)
+    
+    if success:
+        print("  [+] Portfolio posted to Discord")
+    else:
+        print("  [!] Failed to post to Discord")
+
+
 # ── Data helper ───────────────────────────────────────────────────────────────
+
+def _map_ticker(ticker: str) -> str:
+    """Apply ticker alias mapping if exists, else return original."""
+    return TICKER_ALIASES.get(ticker, ticker)
+
 
 def fetch_data(
     ticker:  str,
@@ -143,7 +274,8 @@ def fetch_data(
     call downloads and saves  data/<ticker>.csv; subsequent calls load from
     disk.  Pass refresh=True to force a fresh download for today's prices.
     """
-    return fetch_ohlcv(ticker, days, refresh=refresh)
+    mapped_ticker = _map_ticker(ticker)
+    return fetch_ohlcv(mapped_ticker, days, refresh=refresh)
 
 
 # ── Market regime (screener-specific: fetches its own Nifty data) ─────────────
@@ -215,10 +347,10 @@ def _score_bar(score: float, width: int = 20) -> str:
 
 
 def print_trade_card(
-    rank:   int,
+    rank:    int,
     name:   str,
-    ticker: str,
-    trend:  TrendResult,
+    ticker:  str,
+    trend:   TrendResult,
     cons:   ConsolidationResult,
     setup:  TradeSetupResult,
     vol:    VolumeResult,
@@ -236,11 +368,11 @@ def print_trade_card(
     print(f"  {name}  ({ticker})")
     print("=" * width)
 
-    # Score breakdown
+# Score breakdown
     print(f"  {'Overall Score':<22}  {_score_bar(score['total'])}")
-    print(f"  {'  Risk score':<22}  {score['risk_score']:>5.1f} / 40"
+    print(f"  {'  Risk score':<22}  {score['risk_score']:>5.1f} / {SCORE_WEIGHT_RISK}"
           f"   (lower risk % is better)")
-    print(f"  {'  Range score':<22}  {score['range_score']:>5.1f} / 35"
+    print(f"  {'  Range score':<22}  {score['range_score']:>5.1f} / {SCORE_WEIGHT_RANGE}"
           f"   (tighter coil is better)")
     g = score["ema50_gap_pct"]
     if g < 1.0:
@@ -251,7 +383,7 @@ def print_trade_card(
         zone = "mild extension (4–6%)"
     else:
         zone = "overextended (>6%)"
-    print(f"  {'  Trend score':<22}  {score['trend_score']:>5.1f} / 25"
+    print(f"  {'  Trend score':<22}  {score['trend_score']:>5.1f} / {SCORE_WEIGHT_TREND}"
           f"   {g:+.2f}% vs EMA50  [{zone}]")
     print()
 
@@ -421,31 +553,177 @@ def save_portfolio(trades: List[PortfolioTrade]) -> None:
     cache = _get_portfolio_cache()
     cache.save("portfolio", {"trades": trades})
 
+
+def _days_since(date_str: str) -> int | None:
+    """Return number of days since date_str (DD-MM-YYYY), or None if invalid."""
+    if not date_str:
+        return None
+    try:
+        trade_date = datetime.strptime(date_str, "%d-%m-%Y")
+        return (datetime.today() - trade_date).days
+    except ValueError:
+        return None
+
+
+def cleanup_portfolio(trades: List[PortfolioTrade]) -> tuple[List[PortfolioTrade], dict]:
+    """
+    Remove stale PENDING trades (> PENDING_EXPIRY_DAYS) and old CLOSED trades (> CLOSED_CLEANUP_DAYS).
+    Returns (cleaned_trades, cleanup_stats) where cleanup_stats contains counts of removed trades.
+    """
+    cleaned = []
+    stats = {"pending_expired": 0, "closed_cleaned": 0, "dead_ticker": 0}
+    
+    for t in trades:
+        ticker = t.get("ticker", "")
+        
+        # Skip dead/delisted tickers
+        if ticker in DEAD_TICKERS:
+            stats["dead_ticker"] = stats.get("dead_ticker", 0) + 1
+            continue
+        
+        days_added = _days_since(t.get("date_added", ""))
+        days_exited = _days_since(t.get("exit_date", ""))
+        days_triggered = _days_since(t.get("entry_trigger_date", ""))
+        
+        if t["status"] == "PENDING":
+            if days_added is not None and days_added > PENDING_EXPIRY_DAYS:
+                stats["pending_expired"] += 1
+                continue
+        elif t["status"] == "CLOSED":
+            if days_exited is not None and days_exited > CLOSED_CLEANUP_DAYS:
+                stats["closed_cleaned"] += 1
+                continue
+        elif t["status"] == "ACTIVE":
+            if days_triggered is None and days_added is not None and days_added > MAX_ACTIVE_DAYS:
+                stats["active_stale"] = stats.get("active_stale", 0) + 1
+                continue
+        
+        cleaned.append(t)
+    
+    return cleaned, stats
+
+
+def _calculate_r_multiple(strategy: str, entry: float, exit_price: float, stop_loss: float) -> float:
+    """Calculate R-multiple based on entry and exit prices."""
+    risk = abs(entry - stop_loss)
+    if risk == 0:
+        return 0.0
+    
+    if strategy == "long_breakout":
+        return (exit_price - entry) / risk
+    else:
+        return (entry - exit_price) / risk
+
+
+def _print_portfolio_summary(trades: List[PortfolioTrade]) -> None:
+    """Print portfolio summary statistics."""
+    if not trades:
+        return
+    
+    active = [t for t in trades if t["status"] == "ACTIVE"]
+    pending = [t for t in trades if t["status"] == "PENDING"]
+    closed = [t for t in trades if t["status"] == "CLOSED"]
+    
+    closed_wins = [t for t in closed if t.get("outcome") == "WIN"]
+    closed_losses = [t for t in closed if t.get("outcome") == "LOSS"]
+    
+    total_closed = len(closed)
+    win_count = len(closed_wins)
+    loss_count = len(closed_losses)
+    win_rate = (win_count / total_closed * 100) if total_closed > 0 else 0
+    
+    r_values = [t.get("r_multiple", 0) for t in closed if t.get("r_multiple", 0) != 0]
+    avg_r = sum(r_values) / len(r_values) if r_values else 0
+    total_r = sum(r_values) if r_values else 0
+    
+    long_active = len([t for t in active if t.get("strategy") == "long_breakout"])
+    short_active = len([t for t in active if t.get("strategy") == "short_breakout"])
+    
+    print(f"\n{'─' * 50}")
+    print(f"  PORTFOLIO SUMMARY")
+    print(f"{'─' * 50}")
+    print(f"  Active: {len(active)} (LONG:{long_active} SHORT:{short_active})  |  Pending: {len(pending)}  |  Closed: {total_closed}")
+    if total_closed > 0:
+        print(f"  Wins: {win_count}  |  Losses: {loss_count}  |  Win Rate: {win_rate:.1f}%")
+        print(f"  Avg R: {avg_r:+.2f}  |  Total R: {total_r:+.2f}R")
+    print(f"{'─' * 50}")
+
+
 def update_portfolio() -> None:
     """
     Fetch latest prices for all tracked trades and update their status.
+    - Cleans up stale PENDING trades (> PENDING_EXPIRY_DAYS)
+    - Cleans up old CLOSED trades (> CLOSED_CLEANUP_DAYS)
+    - Tracks entry_trigger_date when entry triggers
+    - Calculates r_multiple when trade closes
     Prints a summary of active/pending trades.
     """
     trades = load_portfolio()
     if not trades:
         return
 
-    print("\n" + "=" * 72)
-    print(f"{'CURRENT PORTFOLIO TRACKER':^72}")
-    print("=" * 72)
+    # Clean up stale trades first
+    trades, cleanup_stats = cleanup_portfolio(trades)
     
+    parts = []
+    if cleanup_stats.get("pending_expired", 0) > 0:
+        parts.append(f"{cleanup_stats['pending_expired']} PENDING expired")
+    if cleanup_stats.get("closed_cleaned", 0) > 0:
+        parts.append(f"{cleanup_stats['closed_cleaned']} CLOSED removed")
+    if cleanup_stats.get("dead_ticker", 0) > 0:
+        parts.append(f"{cleanup_stats['dead_ticker']} dead/delisted")
+    
+    if parts:
+        print(f"\n  Portfolio cleanup: {', '.join(parts)}")
+
+    print("\n" + "=" * 90)
+    print(f"{'CURRENT PORTFOLIO TRACKER':^90}")
+    print("=" * 90)
+    
+    # Print portfolio summary header
+    _print_portfolio_summary(trades)
+     
     updated_trades = []
     
-    col = f"{'Ticker':<12} {'Status':<10} {'Entry':>8} {'SL':>8} {'Target':>9} {'Current':>8} {'Update'}"
+    # Sort trades: ACTIVE first, then PENDING, then CLOSED
+    # Within each status, sort by days since relevant date
+    def sort_key(t):
+        status_order = {"ACTIVE": 0, "PENDING": 1, "CLOSED": 2}
+        status_priority = status_order.get(t["status"], 3)
+        
+        if t["status"] == "PENDING":
+            days = _days_since(t.get("date_added", "")) or 0
+        elif t["status"] == "ACTIVE":
+            days = _days_since(t.get("entry_trigger_date", "")) or 0
+        else:
+            days = _days_since(t.get("exit_date", "")) or 0
+        
+        return (status_priority, days)
+    
+    trades.sort(key=sort_key)
+    
+    col = f"{'Ticker':<12} {'Dir':<5} {'Status':<9} {'Added':<11} {'Trigger':<11} {'Exit':<11} {'Days':>4} {'Entry':>8} {'SL':>8} {'Target':>9} {'Current':>9} {'R'}"
     print(f"  {col}")
     print(f"  {'-' * len(col)}")
 
     for t in trades:
+        # Ensure all fields exist
+        if "r_multiple" not in t:
+            t["r_multiple"] = 0.0
+        if "entry_trigger_date" not in t:
+            t["entry_trigger_date"] = ""
+        if "date_added" not in t:
+            t["date_added"] = ""
+        if "exit_date" not in t:
+            t["exit_date"] = ""
+        if "current_price" not in t:
+            t["current_price"] = t.get("entry", 0)
+        
         # Fetch latest data
         df = fetch_ohlcv(t["ticker"], days=30, refresh=True)
         if df is None or df.empty:
             updated_trades.append(t)
-            print(f"  {t['ticker']:<12} {t['status']:<10} [NO DATA]")
+            print(f"  {t['ticker']:<12} {t['status']:<9} [NO DATA]")
             continue
 
         df = add_indicators(df)
@@ -454,49 +732,81 @@ def update_portfolio() -> None:
         curr_high = float(last_row["High"])
         curr_low = float(last_row["Low"])
         
+        t["current_price"] = curr_close
         status_change = ""
+        r_display = f"{t['r_multiple']:.2f}" if t["r_multiple"] != 0 else "-"
+        
+        direction = "LONG" if t["strategy"] == "long_breakout" else "SHORT"
+        
+        # Date display based on status
+        added_date = t.get("date_added", "") or "-"
+        trigger_date = t.get("entry_trigger_date", "") or "-"
+        exit_date = t.get("exit_date", "") or "-"
+        
+        if t["status"] == "PENDING":
+            days_since = _days_since(t.get("date_added", ""))
+        elif t["status"] == "ACTIVE":
+            days_since = _days_since(t.get("entry_trigger_date", ""))
+        else:
+            days_since = _days_since(t.get("exit_date", ""))
+        
+        days_str = str(days_since) if days_since is not None else "-"
         
         if t["status"] == "PENDING":
             if t["strategy"] == "long_breakout":
                 if curr_high >= t["entry"]:
                     t["status"] = "ACTIVE"
-                    status_change = "→ TRIGGERED ACTIVE"
+                    t["entry_trigger_date"] = df.index[-1].strftime("%d-%m-%Y")
+                    trigger_date = t["entry_trigger_date"]
+                    status_change = "→ TRIGGERED"
             elif t["strategy"] == "short_breakout":
                 if curr_low <= t["entry"]:
                     t["status"] = "ACTIVE"
-                    status_change = "→ TRIGGERED ACTIVE"
+                    t["entry_trigger_date"] = df.index[-1].strftime("%d-%m-%Y")
+                    trigger_date = t["entry_trigger_date"]
+                    status_change = "→ TRIGGERED"
         
+        exit_price = None
         if t["status"] == "ACTIVE":
             if t["strategy"] == "long_breakout":
                 if curr_low <= t["stop_loss"]:
                     t["status"] = "CLOSED"
                     t["outcome"] = "LOSS"
-                    t["exit_date"] = df.index[-1].strftime("%d-%m-%Y")
-                    status_change = "→ HIT STOP LOSS (CLOSED)"
+                    exit_price = t["stop_loss"]
+                    status_change = "→ SL HIT"
                 elif curr_high >= t["target"]:
                     t["status"] = "CLOSED"
                     t["outcome"] = "WIN"
-                    t["exit_date"] = df.index[-1].strftime("%d-%m-%Y")
-                    status_change = "→ HIT TARGET (CLOSED)"
+                    exit_price = t["target"]
+                    status_change = "→ TARGET HIT"
             elif t["strategy"] == "short_breakout":
                 if curr_high >= t["stop_loss"]:
                     t["status"] = "CLOSED"
                     t["outcome"] = "LOSS"
-                    t["exit_date"] = df.index[-1].strftime("%d-%m-%Y")
-                    status_change = "→ HIT STOP LOSS (CLOSED)"
+                    exit_price = t["stop_loss"]
+                    status_change = "→ SL HIT"
                 elif curr_low <= t["target"]:
                     t["status"] = "CLOSED"
                     t["outcome"] = "WIN"
-                    t["exit_date"] = df.index[-1].strftime("%d-%m-%Y")
-                    status_change = "→ HIT TARGET (CLOSED)"
+                    exit_price = t["target"]
+                    status_change = "→ TARGET HIT"
+            
+            if exit_price is not None:
+                t["exit_date"] = df.index[-1].strftime("%d-%m-%Y")
+                exit_date = t["exit_date"]
+                t["r_multiple"] = round(_calculate_r_multiple(t["strategy"], t["entry"], exit_price, t["stop_loss"]), 2)
+                r_display = f"{t['r_multiple']:.2f}"
 
-        print(f"  {t['ticker']:<12} {t['status']:<10} {t['entry']:>8.2f} {t['stop_loss']:>8.2f} {t['target']:>9.2f} {curr_close:>8.2f} {status_change}")
+        print(f"  {t['ticker']:<12} {direction:<5} {t['status']:<9} {added_date:<11} {trigger_date:<11} {exit_date:<11} {days_str:>4} {t['entry']:>8.2f} {t['stop_loss']:>8.2f} {t['target']:>9.2f} {curr_close:>9.2f} {r_display:>4} {status_change}")
         
         if t["status"] != "CLOSED":
             updated_trades.append(t)
 
+    # Send to Discord
+    send_portfolio_to_discord(trades)
+    
     save_portfolio(updated_trades)
-    print("=" * 72 + "\n")
+    print("=" * 90 + "\n")
 
 def add_to_portfolio(ticker: str, name: str, strategy: str, entry: float, sl: float, target: float) -> None:
     """Add a new setup to the portfolio if it is not already tracked."""
@@ -515,8 +825,11 @@ def add_to_portfolio(ticker: str, name: str, strategy: str, entry: float, sl: fl
         "stop_loss": sl,
         "target": target,
         "date_added": datetime.today().strftime("%d-%m-%Y"),
+        "entry_trigger_date": "",
         "exit_date": "",
-        "outcome": ""
+        "outcome": "",
+        "r_multiple": 0.0,
+        "current_price": entry,
     }
     trades.append(new_trade)
     save_portfolio(trades)
@@ -535,7 +848,7 @@ def run_screener() -> None:
     print(f"{'SWING TRADING SCREENER  -  INDIAN STOCKS (NSE)':^{width}}")
     if LIVE_MODE:
         print(f"{'[LIVE MODE — clean output]':^{width}}")
-    print(f"{'Stage 0 : Market Regime  (Nifty 50 > EMA50)':^{width}}")
+    print(f"{'Stage 0 : Market Regime filter disabled':^{width}}")
     print(f"{'Stage 1 : Close > EMA50 > EMA200':^{width}}")
     print(f"{'Stage 2 : Coil  (range < ' + str(MAX_RANGE_PCT) + '%, near high < ' + str(NEAR_HIGH_PCT) + '%)':^{width}}")
     gap_pct_str = f"{int((GAP_UP_THRESHOLD - 1) * 100)}%"
@@ -548,61 +861,10 @@ def run_screener() -> None:
     # ── Update tracked trades first ───────────────────────────────────────────
     update_portfolio()
 
-    # ── Stage 0 : Market regime ──────────────────────────────────────────────────
-
-    print(f"\n  Checking market regime ({NIFTY_TICKER}) ...", end="  ", flush=True)
-    regime = check_market_regime()
-    print("done.\n")
-
-    print("=" * width)
-    print(f"{'MARKET REGIME  —  NIFTY 50':^{width}}")
-    print("=" * width)
-
-    if regime["error"]:
-        print(f"  WARNING: {regime['error']}")
-        print("  Proceeding without market filter (data unavailable).")
-        market_ok    = True
-        regime_label = "UNKNOWN"
-    else:
-        _regime_map = {
-            "STRONG_BULL": ("✅", "STRONG BULL"),
-            "EARLY_TREND": ("⚡", "EARLY TREND  (EMA20 recovery, reduced conviction)"),
-            "BEAR":        ("🚫", "BEAR"),
-        }
-        r_icon, r_text = _regime_map.get(regime["regime"], ("❓", regime["regime"]))
-
-        assert regime["close"] is not None
-        assert regime["ema20"] is not None
-        assert regime["ema50"] is not None
-        gap50     = round(float((regime["close"] - regime["ema50"]) / regime["ema50"] * 100), 2)
-        gap50_sign = "+" if gap50 >= 0 else ""
-        gap20      = round(float((regime["close"] - regime["ema20"]) / regime["ema20"] * 100), 2)
-        gap20_sign = "+" if gap20 >= 0 else ""
-
-        print(f"  {'Nifty Close':<22}  {regime['close']:>10,.2f}")
-        print(f"  {'Nifty EMA 20':<22}  {regime['ema20']:>10,.2f}"
-              f"   ({gap20_sign}{gap20:.2f}%)")
-        print(f"  {'Nifty EMA 50':<22}  {regime['ema50']:>10,.2f}"
-              f"   ({gap50_sign}{gap50:.2f}%)")
-        print(f"  {'Market Status':<22}  {r_icon}  {r_text}")
-        market_ok    = regime["is_bullish"]
-        regime_label = regime["regime"]
-
-    print("=" * width)
-
-    if not market_ok:
-        print()
-        print("  Market is NOT favorable — Nifty is below EMA50 and EMA20 slope "
-              "is negative.")
-        print("  No individual stock trades allowed in a BEAR regime.")
-        print("  Re-run when Nifty shows early recovery (EMA20 slope turns up).")
-        print()
-        if LIVE_MODE:
-            print_execution_summary([], market_ok=False,
-                                    regime_label="BEAR", width=width)
-        return
-
-    print()
+# ── Stage 0 : Market regime filter intentionally disabled ──────────────────
+    market_ok = True
+    regime_label = "UNKNOWN"
+    print("\n  Market regime filter disabled — skipping Nifty EMA gate.\n")
 
     # ── Scan progress indicator (LIVE_MODE) ───────────────────────────────────
     if LIVE_MODE:
@@ -610,6 +872,11 @@ def run_screener() -> None:
 
     # ── Scan loop ─────────────────────────────────────────────────────────────
     for ticker, name in STOCKS.items():
+        # Skip dead/delisted tickers
+        if ticker in DEAD_TICKERS:
+            skipped += 1
+            continue
+        
         n = scanned + skipped + 1
 
         if not LIVE_MODE:
@@ -772,7 +1039,7 @@ def run_screener() -> None:
 
         if not LIVE_MODE:
             print(f"  * {len(final_setups)} setup(s) ranked  |  "
-                  f"Score = Risk(40) + Range(35) + Trend(25)")
+                  f"Score = Risk({SCORE_WEIGHT_RISK}) + Range({SCORE_WEIGHT_RANGE}) + Trend({SCORE_WEIGHT_TREND})")
     else:
         print()
         print("  No trade setups found today.")
@@ -1013,7 +1280,7 @@ def run_screener_short() -> None:
     print(f"{'SHORT BREAKDOWN SCREENER  -  INDIAN STOCKS (NSE)':^{width}}")
     if LIVE_MODE:
         print(f"{'[LIVE MODE — clean output]':^{width}}")
-    print(f"{'Stage 0 : Market Regime  (Nifty 50 < EMA50 — bearish)':^{width}}")
+    print(f"{'Stage 0 : Market Regime filter disabled':^{width}}")
     print(f"{'Stage 1 : Close < EMA50 < EMA200  (downtrend)':^{width}}")
     print(f"{'Stage 2 : Coil  (range < ' + str(MAX_RANGE_PCT) + '%, near low < ' + str(NEAR_HIGH_PCT) + '%)':^{width}}")
     gap_pct_str = f"{int((GAP_UP_THRESHOLD - 1) * 100)}%"
@@ -1026,67 +1293,21 @@ def run_screener_short() -> None:
     # ── Update tracked trades first ───────────────────────────────────────────
     update_portfolio()
 
-    # ── Stage 0 : Market regime ──────────────────────────────────────────────────
-
-    print(f"\n  Checking market regime ({NIFTY_TICKER}) ...", end="  ", flush=True)
-    regime = check_market_regime_bearish()
-    print("done.\n")
-
-    print("=" * width)
-    print(f"{'MARKET REGIME  —  NIFTY 50  [SHORT]':^{width}}")
-    print("=" * width)
-
-    if regime["error"]:
-        print(f"  WARNING: {regime['error']}")
-        print("  Proceeding without market filter (data unavailable).")
-        market_ok    = True
-        regime_label = "UNKNOWN"
-    else:
-        _regime_map = {
-            "STRONG_BEAR": ("✅", "STRONG BEAR — shorts allowed"),
-            "EARLY_BEAR":  ("⚡", "EARLY BEAR  (EMA20 declining, reduced conviction)"),
-            "BULL":        ("🚫", "BULL — no shorts"),
-        }
-        r_icon, r_text = _regime_map.get(regime["regime"], ("❓", regime["regime"]))
-
-        assert regime["close"] is not None
-        assert regime["ema20"] is not None
-        assert regime["ema50"] is not None
-        gap50      = round(float((regime["close"] - regime["ema50"]) / regime["ema50"] * 100), 2)
-        gap50_sign = "+" if gap50 >= 0 else ""
-        gap20      = round(float((regime["close"] - regime["ema20"]) / regime["ema20"] * 100), 2)
-        gap20_sign = "+" if gap20 >= 0 else ""
-
-        print(f"  {'Nifty Close':<22}  {regime['close']:>10,.2f}")
-        print(f"  {'Nifty EMA 20':<22}  {regime['ema20']:>10,.2f}"
-              f"   ({gap20_sign}{gap20:.2f}%)")
-        print(f"  {'Nifty EMA 50':<22}  {regime['ema50']:>10,.2f}"
-              f"   ({gap50_sign}{gap50:.2f}%)")
-        print(f"  {'Market Status':<22}  {r_icon}  {r_text}")
-        market_ok    = regime["is_bullish"]   # True = bearish-tradeable
-        regime_label = regime["regime"]
-
-    print("=" * width)
-
-    if not market_ok:
-        print()
-        print("  Market is NOT bearish enough — Nifty is above EMA50 or breadth "
-              "is too strong.")
-        print("  No short trades allowed in a BULL regime.")
-        print("  Re-run when Nifty shows bearish breakdown (close < EMA50).")
-        print()
-        if LIVE_MODE:
-            print_execution_summary_short([], market_ok=False,
-                                          regime_label="BULL", width=width)
-        return
-
-    print()
+    # ── Stage 0 : Market regime filter intentionally disabled ──────────────────
+    market_ok = True
+    regime_label = "UNKNOWN"
+    print("\n  Market regime filter disabled — skipping Nifty EMA gate.\n")
 
     if LIVE_MODE:
         print(f"  Scanning {total} stocks ...", flush=True)
 
     # ── Scan loop ─────────────────────────────────────────────────────────────
     for ticker, name in STOCKS.items():
+        # Skip dead/delisted tickers
+        if ticker in DEAD_TICKERS:
+            skipped += 1
+            continue
+        
         n = scanned + skipped + 1
 
         if not LIVE_MODE:
@@ -1249,7 +1470,7 @@ def run_screener_short() -> None:
 
         if not LIVE_MODE:
             print(f"  * {len(final_setups)} short setup(s) ranked  |  "
-                  f"Score = Risk(40) + Range(35) + Trend(25)")
+                  f"Score = Risk({SCORE_WEIGHT_RISK}) + Range({SCORE_WEIGHT_RANGE}) + Trend({SCORE_WEIGHT_TREND})")
     else:
         print()
         print("  No short trade setups found today.")

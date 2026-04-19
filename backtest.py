@@ -45,6 +45,12 @@ if hasattr(sys.stdout, "reconfigure"):
 # ── Shared imports ────────────────────────────────────────────────────────────
 from datetime import datetime
 
+try:
+    from reports.backtest.version import save_backtest_result
+    BACKTEST_VERSIONING = True
+except ImportError:
+    BACKTEST_VERSIONING = False
+
 from config.settings import (
     BACKTEST_DAYS,
     BACKTEST_FETCH_DAYS,
@@ -431,14 +437,11 @@ def run_backtest(
         if i >= len(all_dates) - 1:
             continue
 
-        regime_ok, regime_label, _breadth = get_market_regime(nifty_df, i, stock_data)
-        if not regime_ok:
-            continue
+        # Market regime filter intentionally disabled
+        regime_ok = True
+        regime_label = "DISABLED"
 
-        # In EARLY_TREND regime apply optional trade-capacity reduction
         effective_max = MAX_CONCURRENT_TRADES
-        if regime_label == "EARLY_TREND" and EARLY_TREND_MAX_TRADES_FACTOR < 1.0:
-            effective_max = max(1, round(float(MAX_CONCURRENT_TRADES * EARLY_TREND_MAX_TRADES_FACTOR)))
 
         if len(active_trades) >= effective_max:
             continue
@@ -833,6 +836,34 @@ def run_backtest_strategy(export: bool = False) -> None:
 
     print_summary(trades, final_equity)
 
+    # Save to backtest history
+    if BACKTEST_VERSIONING:
+        total = len(trades)
+        wins = sum(1 for t in trades if t["outcome"] == "win")
+        losses = sum(1 for t in trades if t["outcome"] == "loss")
+        win_rate = round(float(wins / total * 100), 1) if total else 0.0
+        
+        win_amounts = [abs(t["pnl_pct"]) for t in trades if t["outcome"] == "win"]
+        loss_amounts = [abs(t["pnl_pct"]) for t in trades if t["outcome"] == "loss"]
+        avg_win = sum(win_amounts) / len(win_amounts) if win_amounts else 0.0
+        avg_loss = sum(loss_amounts) / len(loss_amounts) if loss_amounts else 0.0
+        avg_rr = round(avg_win / avg_loss, 2) if avg_loss > 0 else 0.0
+        
+        avg_hold = round(float(sum(t["bars_held"] for t in trades) / total), 1) if total else 0.0
+        net_pct = round(float((final_equity - STARTING_EQUITY) / STARTING_EQUITY * 100), 2)
+        
+        save_backtest_result(
+            strategy="long_breakout",
+            total_trades=total,
+            win_rate=win_rate,
+            net_pct=net_pct,
+            final_equity=final_equity,
+            avg_rr=avg_rr,
+            avg_hold=avg_hold,
+            notes=f"Config: COIL={COIL_CANDLES}, RANGE={MAX_RANGE_PCT}%, RR={REWARD_RATIO}",
+        )
+        print(f"\n  [+] Saved to backtest history\n")
+
     if export:
         df_trades = pd.DataFrame(trades)
         if "df" in df_trades.columns:
@@ -1086,13 +1117,11 @@ def run_backtest_short(
         if i >= len(all_dates) - 1:
             continue
 
-        regime_ok, regime_label, _breadth = get_market_regime_short(nifty_df, i, stock_data)
-        if not regime_ok:
-            continue
+        # Market regime filter intentionally disabled
+        regime_ok = True
+        regime_label = "DISABLED"
 
         effective_max = MAX_CONCURRENT_TRADES
-        if regime_label == "EARLY_BEAR" and EARLY_TREND_MAX_TRADES_FACTOR < 1.0:
-            effective_max = max(1, round(float(MAX_CONCURRENT_TRADES * EARLY_TREND_MAX_TRADES_FACTOR)))
 
         if len(active_trades) >= effective_max:
             continue
@@ -1319,6 +1348,34 @@ def run_backtest_strategy_short(export: bool = False) -> None:
         return
 
     print_summary_short(trades, final_equity)
+
+    # Save to backtest history
+    if BACKTEST_VERSIONING:
+        total = len(trades)
+        wins = sum(1 for t in trades if t["outcome"] == "win")
+        losses = sum(1 for t in trades if t["outcome"] == "loss")
+        win_rate = round(float(wins / total * 100), 1) if total else 0.0
+        
+        win_amounts = [abs(t["pnl_pct"]) for t in trades if t["outcome"] == "win"]
+        loss_amounts = [abs(t["pnl_pct"]) for t in trades if t["outcome"] == "loss"]
+        avg_win = sum(win_amounts) / len(win_amounts) if win_amounts else 0.0
+        avg_loss = sum(loss_amounts) / len(loss_amounts) if loss_amounts else 0.0
+        avg_rr = round(avg_win / avg_loss, 2) if avg_loss > 0 else 0.0
+        
+        avg_hold = round(float(sum(t["bars_held"] for t in trades) / total), 1) if total else 0.0
+        net_pct = round(float((final_equity - STARTING_EQUITY) / STARTING_EQUITY * 100), 2)
+        
+        save_backtest_result(
+            strategy="short_breakout",
+            total_trades=total,
+            win_rate=win_rate,
+            net_pct=net_pct,
+            final_equity=final_equity,
+            avg_rr=avg_rr,
+            avg_hold=avg_hold,
+            notes=f"Config: COIL={COIL_CANDLES}, RANGE={MAX_RANGE_PCT}%, RR={REWARD_RATIO}",
+        )
+        print(f"\n  [+] Saved to backtest history\n")
 
     if export:
         df_trades = pd.DataFrame(trades)

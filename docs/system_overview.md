@@ -1,4 +1,4 @@
-# 📈 SWING TRADING SYSTEM — FINAL OVERVIEW (March 2026)
+# 📈 SWING TRADING SYSTEM — CURRENT OVERVIEW (April 2026)
 
 ---
 
@@ -6,9 +6,9 @@
 
 Trend-following swing trading system based on:
 - Breakout + consolidation structure
-- Market regime filtering
+- EMA trend filtering (regime filter DISABLED - manual verification required)
 - Risk-defined execution
-- Low win-rate, high RR model
+- Low win-rate (~25%), high RR (1:2) model
 
 ---
 
@@ -19,8 +19,8 @@ Trend-following swing trading system based on:
 - Trend condition:
   - Close > EMA50 > EMA200
 - Consolidation:
-  - Last 12 candles range < 8%
-  - Price near highs (<5% from breakout level)
+  - Last 10 candles range < 8% (relaxed to 10%)
+  - Price near highs (<8% from breakout level)
 
 ---
 
@@ -80,16 +80,13 @@ Move SL → Entry ONLY IF:
 
 ---
 
-## 🧭 MARKET REGIME SYSTEM
+## 🧭 MARKET REGIME SYSTEM (DISABLED)
 
-### Indicators Used:
-- EMA20 (short-term trend)
-- EMA50 (primary trend)
-- Market Breadth (% stocks above EMA50)
+### Status: REGIME FILTER IS NOW DISABLED
 
----
+The regime filter has been removed from all strategies. Manual verification of market conditions is now required before trading.
 
-### Regime Classification
+### Historical (for reference):
 
 #### ✅ STRONG_BULL
 - Close > EMA50
@@ -102,14 +99,6 @@ Move SL → Entry ONLY IF:
 
 #### 🚫 BEAR
 - All other conditions
-
----
-
-### Execution Rule
-
-- STRONG_BULL → Trade normally
-- EARLY_TREND → Trade allowed
-- BEAR → ❌ No trades
 
 ---
 
@@ -136,26 +125,26 @@ Move SL → Entry ONLY IF:
 ## 🧾 UNIVERSE & FILTERS
 
 ### Universe:
-- ~482 NSE stocks (expanding toward 1000+)
+- ~654 NSE stocks
 
 ---
 
-### Filters:
+### Filters (Current):
 
 - Liquidity:
-  - Minimum ₹10 Cr daily turnover
+  - Minimum ₹5 Cr daily turnover (relaxed from ₹10 Cr)
 
 - Price:
   - Minimum ₹50 (avoid penny stocks)
 
 - Volume:
-  - ≥ 1.5x average volume
+  - ≥ 1.0x average volume (relaxed - no volume surge required)
 
 - Gap filter:
   - Skip if gap-up > 2%
 
 - Risk filter:
-  - Trade risk < 10%
+  - Trade risk < 15% (relaxed from 10%)
 
 ---
 
@@ -168,15 +157,13 @@ Move SL → Entry ONLY IF:
 
 ---
 
-## 📊 PERFORMANCE SUMMARY
+## 📊 PERFORMANCE SUMMARY (Current)
 
-- Total trades: ~343
-- Win rate: ~24–27%
-- Avg RR: ~1 : 1.8
-- Net return: ~140%
-- Walk-forward validated:
-  - Stable in-sample vs out-of-sample
-  - No overfitting detected
+- Total trades: ~666 (long), ~468 (short)
+- Win rate: ~29% (long), ~21% (short)
+- Avg RR: ~1 : 2.0
+- Net return: +568% (long), +31% (short)
+- Test coverage: 80%
 
 ---
 
@@ -293,10 +280,11 @@ Track:
 
 ## 🚨 GOLDEN RULES
 
-- ❌ Do not trade in BEAR regime
+- ❌ Do not trade without verifying market conditions (regime filter disabled)
 - ❌ Do not override system rules
-- ❌ Do not increase risk
+- ❌ Do not exceed 1% risk per trade
 - ❌ Do not chase missed trades
+- ✅ Run screener daily during market hours
 
 ---
 

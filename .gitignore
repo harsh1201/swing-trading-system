@@ -1,5 +1,13 @@
 # Individual data files
 data/*.csv
+data/portfolio.json
+data/cache/
+reports/cache/
+
+# Debug outputs
+*.txt
+*.csv
+.coverage
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

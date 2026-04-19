@@ -197,8 +197,13 @@ def test_is_market_bullish_wrapper(sample_df):
 def test_check_volume_edge_cases(sample_df):
     # idx < VOLUME_AVG_PERIOD (252, 255)
     assert check_volume(sample_df, idx=5) is None
-    # surge_ratio < VOLUME_MIN_RATIO (262-263 covered, but let's be sure)
-    sample_df["Volume"] = 100
+    # With VOLUME_MIN_RATIO = 1.0, surge_ratio >= 1.0 passes
+    # With equal volume (1000), surge_ratio = 1.0 which equals threshold, so it passes
+    result = check_volume(sample_df, idx=25)
+    assert result is not None
+    assert result["surge_ratio"] == 1.0
+    # Test with very low volume to get None (50 / 1000 = 0.05 < 1.0)
+    sample_df.loc[sample_df.index[25], "Volume"] = 50
     assert check_volume(sample_df, idx=25) is None
 
 def test_check_gap_condition_zero_entry():
