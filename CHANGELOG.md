@@ -4,6 +4,33 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+---
+
+## [1.6] - 2026-04-20 (Test Coverage)
+
+### Added
+- **Test Coverage**: data/cache.py now at 100% coverage
+- 5 new tests added for cache edge cases (corrupt cache, download exceptions, empty data, duplicate columns, MultiIndex)
+
+### Changed
+- **Test Coverage**: 84% overall (up from 80%)
+
+---
+
+## [1.5] - 2026-04-20
+
+### Added
+- **max_drawdown tracking**: Backtest now calculates peak equity and max drawdown on each trade close
+- **Discord error logging**: Shows specific error (HTTP code or exception)
+
+### Changed
+- **.env fix**: Removed extra quotes around webhook URL values
+- **Backtest Results**: REWARD_RATIO=2.0, Long: 666 trades, 29.3% WR, +584.47%, Max DD 7.69%
+
+---
+
+## [Unreleased] (placeholder)
+
 ### Added
 - **Ticker Aliases**: Added mapping for stocks with symbol changes (IIFLSEC→IIFLCAPS, CANFIN→CANFINHOME, REPCO→REPCOHOME, VIJAYAETL→VIJAYA)
 - **DEAD_TICKERS**: Added KENNAMET.NS, WELSPUNIND.NS, TATAMOTORS.NS to handle delisted/demerged stocks

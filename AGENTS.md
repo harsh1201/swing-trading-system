@@ -311,13 +311,13 @@ Portfolio summary auto-posts to Discord when screener runs.
 
 ## Test Suite Status (2026-04-20)
 
-**98 tests passing** across all modules:
+**103 tests passing** across all modules:
 - `test_backtest.py`: 9 tests ✓
-- `test_data_cache.py`: 30+ tests ✓
+- `test_data_cache.py`: 12 tests ✓ (100% coverage)
 - `test_data_earnings.py`: 4 tests ✓
 - `test_long_breakout.py`: 23 tests ✓
 - `test_screener.py`: 40 tests ✓
-- `test_short_breakbreak.py`: 15 tests ✓
+- `test_short_breakout.py`: 15 tests ✓
 
 **Overall coverage: 80%**
 - strategies/long_breakout.py: 100%
