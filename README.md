@@ -34,6 +34,7 @@ The system is modular and designed for easy extension:
 3.  **`strategies/long_breakout.py`**: Long-only breakout logic.
 4.  **`strategies/short_breakout.py`**: Short-side breakdown logic.
 5.  **`config/settings.py`**: User-defined risk and system parameters.
+6.  **`tests/`**: 103 unit tests (84% coverage, data/cache.py at 100%).
 
 👉 See the full [Architecture Documentation](docs/architecture.md) for more details.
 
