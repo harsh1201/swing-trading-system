@@ -88,7 +88,7 @@ MAX_RANGE_PCT = 8.0  # max high-low range across the window (%) — relaxed for 
 NEAR_HIGH_PCT = 5.0  # close must be within this % of the period high — relaxed
 
 # ── Trade setup ────────────────────────────────────────────────────────────────
-REWARD_RATIO = 2.0    # target = entry + REWARD_RATIO × risk  (1:2 RR)
+REWARD_RATIO = 2.0    # target = entry + REWARD_RATIO × risk  (1:1.5 RR) - BEST TESTED
 MAX_RISK_PCT = 12.0   # skip setup if risk > this % of entry price (relaxed from 10%)
 
 # ── Position sizing ────────────────────────────────────────────────────────────

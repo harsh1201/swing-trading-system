@@ -347,11 +347,13 @@ def run_backtest(
       • Size each trade so that a full stop-loss costs RISK_PER_TRADE % equity.
       • Open up to MAX_CONCURRENT_TRADES simultaneous positions.
 
-    Returns (closed_trades, final_equity).
+    Returns (closed_trades, final_equity, max_drawdown).
     """
     all_dates = nifty_df.index
     start_idx = max(EMA_LONG + 10, len(all_dates) - BACKTEST_DAYS)
     equity = float(STARTING_EQUITY)
+    peak_equity = equity
+    max_drawdown = 0.0
 
     active_trades: list[Trade] = []
     closed_trades: list[Trade] = []
@@ -405,9 +407,15 @@ def run_backtest(
             if low_bar <= trade["active_sl"]:
                 outcome = "breakeven" if trade["be_hit"] else "loss"
                 equity += _close(trade, trade["active_sl"], outcome, i, closed_trades, date.strftime("%d-%m-%Y"))
+                peak_equity = max(peak_equity, equity)
+                drawdown = (peak_equity - equity) / peak_equity if peak_equity > 0 else 0.0
+                max_drawdown = max(max_drawdown, drawdown)
 
             elif high_bar >= target:
                 equity += _close(trade, target, "win", i, closed_trades, date.strftime("%d-%m-%Y"))
+                peak_equity = max(peak_equity, equity)
+                drawdown = (peak_equity - equity) / peak_equity if peak_equity > 0 else 0.0
+                max_drawdown = max(max_drawdown, drawdown)
 
             elif is_entry_bar:
                 # Entry bar: SL and target already checked; skip TRL
@@ -543,7 +551,11 @@ def run_backtest(
         exit_price = float(df["Close"].iloc[last_bar])
         equity += _close(trade, exit_price, "trail", last_i, closed_trades, df.index[last_bar].strftime("%d-%m-%Y"))
 
-    return closed_trades, equity
+    peak_equity = max(peak_equity, equity)
+    drawdown = (peak_equity - equity) / peak_equity if peak_equity > 0 else 0.0
+    max_drawdown = max(max_drawdown, drawdown)
+
+    return closed_trades, equity, max_drawdown
 
 
 # ── Analysis helpers ──────────────────────────────────────────────────────────
@@ -703,7 +715,7 @@ def print_walkforward_summary(trades: list[Trade], width: int = 62) -> None:
 # ── Summary printer ───────────────────────────────────────────────────────────
 
 
-def print_summary(trades: list[Trade], final_equity: float) -> None:
+def print_summary(trades: list[Trade], final_equity: float, max_drawdown: float = 0.0) -> None:
     """Print trade statistics, equity summary, and all robustness sections."""
     width = 62
     total = len(trades)
@@ -777,6 +789,7 @@ def print_summary(trades: list[Trade], final_equity: float) -> None:
     print(f"  {'Final equity':<30}  Rs. {final_equity:>10,.0f}")
     sign = "+" if net_pct >= 0 else ""
     print(f"  {'Net P&L  (after costs)':<30}  Rs. {net_abs:>+10,.0f}  ({sign}{net_pct}%)")
+    print(f"  {'Max drawdown':<30}  {max_drawdown*100:.2f}%")
     print(f"  {'Total costs paid':<30}  Rs. {total_cost:>10,.0f}")
     print("=" * width)
 
@@ -823,7 +836,7 @@ def run_backtest_strategy(export: bool = False) -> None:
     print(f"{'TRADE LOG':^{width}}")
     print("─" * width)
 
-    trades, final_equity = run_backtest(nifty_df, stock_data)
+    trades, final_equity, max_drawdown = run_backtest(nifty_df, stock_data)
 
     if not trades:
         print("\n  No trades were generated in the backtest period.")
@@ -834,7 +847,7 @@ def run_backtest_strategy(export: bool = False) -> None:
         print()
         return
 
-    print_summary(trades, final_equity)
+    print_summary(trades, final_equity, max_drawdown)
 
     # Save to backtest history
     if BACKTEST_VERSIONING:
@@ -859,6 +872,7 @@ def run_backtest_strategy(export: bool = False) -> None:
             net_pct=net_pct,
             final_equity=final_equity,
             avg_rr=avg_rr,
+            max_drawdown=max_drawdown,
             avg_hold=avg_hold,
             notes=f"Config: COIL={COIL_CANDLES}, RANGE={MAX_RANGE_PCT}%, RR={REWARD_RATIO}",
         )
@@ -1025,11 +1039,13 @@ def run_backtest_short(
           next bar must have Low <= entry AND Close <= entry.
       • Size each trade so that a full stop-loss costs RISK_PER_TRADE % equity.
 
-    Returns (closed_trades, final_equity).
+    Returns (closed_trades, final_equity, max_drawdown).
     """
     all_dates = nifty_df.index
     start_idx = max(EMA_LONG + 10, len(all_dates) - BACKTEST_DAYS)
     equity = float(STARTING_EQUITY)
+    peak_equity = equity
+    max_drawdown = 0.0
 
     active_trades: list[Trade] = []
     closed_trades: list[Trade] = []
@@ -1083,10 +1099,16 @@ def run_backtest_short(
             if high_bar >= trade["active_sl"]:
                 outcome = "breakeven" if trade["be_hit"] else "loss"
                 equity += _close_short(trade, trade["active_sl"], outcome, i, closed_trades, date.strftime("%d-%m-%Y"))
+                peak_equity = max(peak_equity, equity)
+                drawdown = (peak_equity - equity) / peak_equity if peak_equity > 0 else 0.0
+                max_drawdown = max(max_drawdown, drawdown)
 
             # Target hit: price goes DOWN to target (short wins when price falls)
             elif low_bar <= target:
                 equity += _close_short(trade, target, "win", i, closed_trades, date.strftime("%d-%m-%Y"))
+                peak_equity = max(peak_equity, equity)
+                drawdown = (peak_equity - equity) / peak_equity if peak_equity > 0 else 0.0
+                max_drawdown = max(max_drawdown, drawdown)
 
             elif is_entry_bar:
                 # Entry bar: SL and target already checked; skip TRL
@@ -1108,6 +1130,9 @@ def run_backtest_short(
                         exit_price = float(df["Close"].iloc[bar])
                         exit_date_str = df.index[bar].strftime("%d-%m-%Y")
                     equity += _close_short(trade, exit_price, "trail", i, closed_trades, exit_date_str)
+                    peak_equity = max(peak_equity, equity)
+                    drawdown = (peak_equity - equity) / peak_equity if peak_equity > 0 else 0.0
+                    max_drawdown = max(max_drawdown, drawdown)
                 else:
                     still_open.append(trade)
 
@@ -1221,10 +1246,14 @@ def run_backtest_short(
             trade, exit_price, "trail", last_i, closed_trades, df.index[last_bar].strftime("%d-%m-%Y")
         )
 
-    return closed_trades, equity
+    peak_equity = max(peak_equity, equity)
+    drawdown = (peak_equity - equity) / peak_equity if peak_equity > 0 else 0.0
+    max_drawdown = max(max_drawdown, drawdown)
+
+    return closed_trades, equity, max_drawdown
 
 
-def print_summary_short(trades: list[Trade], final_equity: float) -> None:
+def print_summary_short(trades: list[Trade], final_equity: float, max_drawdown: float = 0.0) -> None:
     """Print trade statistics for SHORT backtest."""
     width = 62
     total = len(trades)
@@ -1294,6 +1323,7 @@ def print_summary_short(trades: list[Trade], final_equity: float) -> None:
     print(f"  {'Final equity':<30}  Rs. {final_equity:>10,.0f}")
     sign = "+" if net_pct >= 0 else ""
     print(f"  {'Net P&L  (after costs)':<30}  Rs. {net_abs:>+10,.0f}  ({sign}{net_pct}%)")
+    print(f"  {'Max drawdown':<30}  {max_drawdown*100:.2f}%")
     print(f"  {'Total costs paid':<30}  Rs. {total_cost:>10,.0f}")
     print("=" * width)
 
@@ -1336,7 +1366,7 @@ def run_backtest_strategy_short(export: bool = False) -> None:
     print(f"{'SHORT TRADE LOG':^{width}}")
     print("─" * width)
 
-    trades, final_equity = run_backtest_short(nifty_df, stock_data)
+    trades, final_equity, max_drawdown = run_backtest_short(nifty_df, stock_data)
 
     if not trades:
         print("\n  No short trades were generated in the backtest period.")
@@ -1347,7 +1377,7 @@ def run_backtest_strategy_short(export: bool = False) -> None:
         print()
         return
 
-    print_summary_short(trades, final_equity)
+    print_summary_short(trades, final_equity, max_drawdown)
 
     # Save to backtest history
     if BACKTEST_VERSIONING:
@@ -1372,6 +1402,7 @@ def run_backtest_strategy_short(export: bool = False) -> None:
             net_pct=net_pct,
             final_equity=final_equity,
             avg_rr=avg_rr,
+            max_drawdown=max_drawdown,
             avg_hold=avg_hold,
             notes=f"Config: COIL={COIL_CANDLES}, RANGE={MAX_RANGE_PCT}%, RR={REWARD_RATIO}",
         )

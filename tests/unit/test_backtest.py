@@ -110,8 +110,8 @@ def test_wrappers(monkeypatch):
     d = pd.date_range("2023-01-01", periods=10)
     df = pd.DataFrame({"Close": [100.0]*10}, index=d)
     monkeypatch.setattr("backtest.fetch_ohlcv", lambda t, d6, refresh=False: df)
-    monkeypatch.setattr("backtest.run_backtest", lambda n, s: ([], 100.0))
-    monkeypatch.setattr("backtest.run_backtest_short", lambda n, s: ([], 100.0))
+    monkeypatch.setattr("backtest.run_backtest", lambda n, s: ([], 100.0, 0.0))
+    monkeypatch.setattr("backtest.run_backtest_short", lambda n, s: ([], 100.0, 0.0))
     run_backtest_strategy()
     run_backtest_strategy_short()
 
@@ -155,6 +155,6 @@ def test_same_bar_protection(monkeypatch):
     # TARGET BAR (idx=18): Price hits target
     sdf.iloc[18, 0:6] = [130.0, 131.0, 125.0, 126.0, 1000.0, 110.0]
     
-    closed_trades, eq = run_backtest(ndf, sdata)
+    closed_trades, eq, max_dd = run_backtest(ndf, sdata)
     assert len(closed_trades) == 1
     assert closed_trades[0]["outcome"] == "win"

@@ -1,7 +1,7 @@
 # AGENTS.md - Swing Trading System Context
 
 > **Last Updated:** 2026-04-20  
-> **Version:** 1.4 (ready for repo push)  
+> **Version:** 1.5 (max_drawdown + Discord fix)  
 > **Maintainer:** Project Owner
 
 ---
@@ -247,6 +247,15 @@ Portfolio summary auto-posts to Discord when screener runs.
 
 ## Changelog
 
+### 2026-04-20 (v1.5 - max_drawdown + Discord fix)
+- Added max_drawdown tracking in backtest (both long & short strategies)
+- Now calculates peak equity and max drawdown on each trade close
+- Added Discord error logging: shows specific error (HTTP code or exception)
+- Fixed .env file: removed extra quotes around webhook URL values
+- Updated test suite: 98 passing, 1 skipped
+- Long backtest results: 666 trades, 29.3% WR, +584.47%, Max DD 7.69%
+- Short backtest results: 467 trades, 20.8% WR, +30.99%, Max DD 26.84%
+
 ### 2026-04-19 (v1.4 - Fully Rebuilt)
 - Complete system rebuild after staging loss
 - Regime filter removed from all strategies (long & short, screener & backtest)
@@ -302,8 +311,8 @@ Portfolio summary auto-posts to Discord when screener runs.
 
 ## Test Suite Status (2026-04-20)
 
-**97 tests passing** across all modules:
-- `test_backtest.py`: 10 tests ✓
+**98 tests passing** across all modules:
+- `test_backtest.py`: 9 tests ✓
 - `test_data_cache.py`: 30+ tests ✓
 - `test_data_earnings.py`: 4 tests ✓
 - `test_long_breakout.py`: 23 tests ✓

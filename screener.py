@@ -148,6 +148,7 @@ class ScreenerSetup(TypedDict):
 def post_to_discord(message: str, webhook_url: str) -> bool:
     """Post a message to Discord via webhook. Returns True on success."""
     if not webhook_url:
+        print("  [!] Discord webhook URL not configured")
         return False
     
     try:
@@ -155,8 +156,12 @@ def post_to_discord(message: str, webhook_url: str) -> bool:
         if len(message) > 2000:
             message = message[:1997] + "..."
         response = requests.post(webhook_url, json={"content": message}, timeout=10)
-        return response.status_code == 204
-    except Exception:
+        if response.status_code == 204:
+            return True
+        print(f"  [!] Discord error: HTTP {response.status_code}")
+        return False
+    except Exception as e:
+        print(f"  [!] Discord error: {e}")
         return False
 
 
