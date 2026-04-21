@@ -1,6 +1,7 @@
 # 📈 NSE India Swing Trading System
 
 > A rule-based, statistically validated swing trading framework for the Indian stock market (NSE).
+> **Version:** 1.7 (2026-04-21)
 
 ---
 
@@ -21,7 +22,7 @@ This repository provides a complete system for finding and backtesting breakout 
 -   **Risk-Defined Sizing**: Automatically calculates position sizes based on a 1% portfolio risk model.
 -   **Cost Modeling**: Real-world backtesting including slippage and transaction costs.
 -   **Walk-Forward Validation**: Built-in robustness testing across years of market data.
--   **Discord Integration**: Auto-posts portfolio to Discord webhook.
+-   **Discord Integration**: Auto-posts portfolio + separate long/short signals to Discord.
 
 ---
 
@@ -34,7 +35,7 @@ The system is modular and designed for easy extension:
 3.  **`strategies/long_breakout.py`**: Long-only breakout logic.
 4.  **`strategies/short_breakout.py`**: Short-side breakdown logic.
 5.  **`config/settings.py`**: User-defined risk and system parameters.
-6.  **`tests/`**: 103 unit tests (84% coverage, data/cache.py at 100%).
+6.  **`tests/`**: 107 unit tests (80%+ coverage).
 
 👉 See the full [Architecture Documentation](docs/architecture.md) for more details.
 
