@@ -1,7 +1,7 @@
 # AGENTS.md - Swing Trading System Context
 
-> **Last Updated:** 2026-04-20  
-> **Version:** 1.5 (max_drawdown + Discord fix)  
+> **Last Updated:** 2026-04-21  
+> **Version:** 1.7 (Discord Fix)  
 > **Maintainer:** Project Owner
 
 ---
@@ -246,6 +246,16 @@ Portfolio summary auto-posts to Discord when screener runs.
 ---
 
 ## Changelog
+
+### 2026-04-21 (v1.7 - Discord Fix)
+- Fixed duplicate signal bug: ANURAS.NS showed twice in screener (once as ACTIVE portfolio, once as new signal)
+- Added portfolio ticker skip: skips PENDING/ACTIVE tickers during scan, allows CLOSED for re-entry
+- Added separate Discord webhooks for long/short signals in .env
+- Added dates to Discord portfolio: added_date, trigger_date, days_held
+- Added send_signals_to_discord() for separate long/short posting
+- Tested: all 3 Discord webhooks verified (Portfolio, Long Signals, Short Signals return 204)
+- Tests: 103 passing, 1 skipped
+- Backtest: 667 trades, 29.2% WR, +576.26%, Max DD 7.69%
 
 ### 2026-04-20 (v1.5 - max_drawdown + Discord fix)
 - Added max_drawdown tracking in backtest (both long & short strategies)
