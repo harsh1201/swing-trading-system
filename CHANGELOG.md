@@ -6,6 +6,23 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [1.7] - 2026-04-21 (Discord Fix)
+
+### Fixed
+- **Duplicate signal bug**: ANURAS.NS showed twice in screener output (once as ACTIVE portfolio, once as new signal)
+- **Portfolio ticker skip**: Now skips PENDING/ACTIVE tickers during scan (allows CLOSED for re-entry)
+- **Discord separate webhooks**: Added separate long/short signal webhooks in .env
+
+### Added
+- **Dates to Discord**: Added added_date, trigger_date, days_held to portfolio formatting
+- **send_signals_to_discord()**: Separate function for long/short signal posting
+
+### Tested
+- All 3 Discord webhooks verified working (Portfolio, Long Signals, Short Signals return 204)
+- Screener verified: ANURAS.NS no longer shows as duplicate signal
+
+---
+
 ## [1.6] - 2026-04-20 (Test Coverage)
 
 ### Added

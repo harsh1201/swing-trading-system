@@ -177,13 +177,43 @@ def format_trade_row(t: dict) -> str:
     curr_price = t.get("current_price", entry)
     r_val = t.get("r_multiple", 0)
     
+    # Date fields
+    added_date = t.get("date_added", "")
+    trigger_date = t.get("entry_trigger_date", "")
+    exit_date = t.get("exit_date", "")
+    
+    # Calculate days
+    from datetime import datetime
+    today = datetime.now()
+    days_info = ""
+    if t["status"] == "PENDING" and added_date:
+        try:
+            d = datetime.strptime(added_date, "%d-%m-%Y")
+            days = (today - d).days
+            days_info = f" | +{days}d"
+        except:
+            pass
+    elif t["status"] == "ACTIVE" and trigger_date:
+        try:
+            d = datetime.strptime(trigger_date, "%d-%m-%Y")
+            days = (today - d).days
+            days_info = f" | {days}d"
+        except:
+            pass
+    elif t["status"] == "CLOSED" and exit_date:
+        outcome = t.get("outcome", "")
+        emoji = "✅" if outcome == "WIN" else "❌" if outcome == "LOSS" else "➖"
+        days_info = f" | {emoji}"
+    
     entry_str = f"₹{entry:,.0f}" if entry else "-"
     sl_str = f"₹{sl:,.0f}" if sl else "-"
     target_str = f"₹{target:,.0f}" if target else "-"
     curr_str = f"₹{curr_price:,.0f}" if curr_price else "-"
     r_str = f"{r_val:+.2f}R" if r_val != 0 else "-"
     
-    return f"{status_emoji} **{ticker}** [{direction}] `Entry:{entry_str} SL:{sl_str} Tgt:{target_str} Curr:{curr_str} R:{r_str}`"
+    date_info = f"({added_date})" if added_date else ""
+    
+    return f"{status_emoji} **{ticker}** [{direction}] {date_info}`E:{entry_str} SL:{sl_str} Tgt:{target_str} Curr:{curr_str} R:{r_str}{days_info}`"
 
 
 def format_portfolio_for_discord(trades: List[PortfolioTrade]) -> str:
@@ -260,6 +290,53 @@ def send_portfolio_to_discord(trades: List[PortfolioTrade]) -> None:
         print("  [+] Portfolio posted to Discord")
     else:
         print("  [!] Failed to post to Discord")
+
+
+def format_signal_for_discord(setup: dict, rank: int) -> str:
+    """Format a single signal as Discord message."""
+    t = setup["setup"]
+    ticker = setup["ticker"].replace(".NS", "")
+    score = setup["score"]
+    
+    direction = "LONG" if "breakout" in setup.get("strategy", "") else "SHORT"
+    emoji = "🟢" if direction == "LONG" else "🔴"
+    
+    lines = []
+    lines.append(f"{emoji} **#{rank} {ticker}** [{direction}]")
+    lines.append(f"   Entry: ₹{t['entry']:,.0f} | SL: ₹{t['stop_loss']:,.0f} | Target: ₹{t['target']:,.0f}")
+    lines.append(f"   Risk: {t['risk_pct']:.1f}% | Score: {score['total']:.1f}/100")
+    lines.append(f"   Added: {setup.get('signal_date', '')}")
+    
+    return "\n".join(lines)
+
+
+def send_signals_to_discord(setups: List[dict], strategy: str) -> None:
+    """Send trade signals to Discord if webhook is configured."""
+    webhook = DISCORD_LONG_SIGNALS_WEBHOOK if strategy == "long_breakout" else DISCORD_SHORT_SIGNALS_WEBHOOK
+    
+    if not webhook or not setups:
+        return
+    
+    date_str = datetime.now().strftime("%d %b %Y")
+    direction = "LONG" if strategy == "long_breakout" else "SHORT"
+    emoji = "🟢" if direction == "LONG" else "🔴"
+    
+    lines = []
+    lines.append(f"{emoji} **{direction} TRADE SIGNALS** - {date_str}")
+    lines.append(f"Found **{len(setups)}** setup(s)")
+    lines.append("")
+    
+    for i, setup in enumerate(setups[:5], 1):
+        lines.append(format_signal_for_discord(setup, i))
+        lines.append("")
+    
+    message = "\n".join(lines)
+    success = post_to_discord(message, webhook)
+    
+    if success:
+        print(f"  [+] {direction} signals posted to Discord")
+    else:
+        print(f"  [!] Failed to post {direction} signals to Discord")
 
 
 # ── Data helper ───────────────────────────────────────────────────────────────
@@ -871,6 +948,17 @@ def run_screener() -> None:
     regime_label = "UNKNOWN"
     print("\n  Market regime filter disabled — skipping Nifty EMA gate.\n")
 
+    # Load portfolio once at start - we'll update it but NOT skip based on it
+    # We need to check entry triggers and close trades first
+    portfolio_trades = load_portfolio()
+
+    # Update portfolio (check triggers, SL/Target hits) and save
+    update_portfolio()
+    
+    # Build set of tickers to skip AFTER updating portfolio
+    portfolio_trades = load_portfolio()
+    portfolio_tickers = {t["ticker"] for t in portfolio_trades}
+
     # ── Scan progress indicator (LIVE_MODE) ───────────────────────────────────
     if LIVE_MODE:
         print(f"  Scanning {total} stocks ...", flush=True)
@@ -976,6 +1064,11 @@ def run_screener() -> None:
 
         score = score_long_breakout(trend, coil)
 
+        # Check if already in portfolio (skip PENDING/ACTIVE, allow CLOSED for re-entry)
+        in_portfolio = any(t["ticker"] == ticker for t in portfolio_trades)
+        if in_portfolio:
+            continue
+        
         if not LIVE_MODE:
             print(f"SETUP FOUND  |  score {score['total']:.1f}/100  "
                   f"range {coil['range_pct']:.1f}%  "
@@ -1056,6 +1149,11 @@ def run_screener() -> None:
     # ── Execution brief (always shown; full detail only in LIVE_MODE) ─────────
     print_execution_summary(final_setups, market_ok=market_ok,
                             regime_label=regime_label, width=width)
+    
+    # Send signals to Discord
+    if final_setups:
+        send_signals_to_discord(final_setups, "long_breakout")
+    
     print()
 
 
@@ -1297,6 +1395,10 @@ def run_screener_short() -> None:
 
     # ── Update tracked trades first ───────────────────────────────────────────
     update_portfolio()
+    
+    # Load portfolio AFTER update to get fresh data for duplicate check
+    portfolio_trades = load_portfolio()
+    portfolio_tickers = {t["ticker"] for t in portfolio_trades}
 
     # ── Stage 0 : Market regime filter intentionally disabled ──────────────────
     market_ok = True
@@ -1310,6 +1412,11 @@ def run_screener_short() -> None:
     for ticker, name in STOCKS.items():
         # Skip dead/delisted tickers
         if ticker in DEAD_TICKERS:
+            skipped += 1
+            continue
+        
+        # Skip if already in portfolio (any status) - prevents duplicate signals
+        if ticker in portfolio_tickers:
             skipped += 1
             continue
         
@@ -1407,6 +1514,11 @@ def run_screener_short() -> None:
 
         score = score_short_breakout(trend, coil)
 
+        # Check if already in portfolio (skip PENDING/ACTIVE, allow CLOSED for re-entry)
+        in_portfolio = any(t["ticker"] == ticker for t in portfolio_trades)
+        if in_portfolio:
+            continue
+        
         if not LIVE_MODE:
             print(f"SHORT SETUP  |  score {score['total']:.1f}/100  "
                   f"range {coil['range_pct']:.1f}%  "
@@ -1486,6 +1598,11 @@ def run_screener_short() -> None:
 
     print_execution_summary_short(final_setups, market_ok=market_ok,
                                   regime_label=regime_label, width=width)
+    
+    # Send signals to Discord
+    if final_setups:
+        send_signals_to_discord(final_setups, "short_breakout")
+    
     print()
 
 
