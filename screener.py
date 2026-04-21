@@ -71,6 +71,8 @@ from config.settings import (
     SCORE_WEIGHT_RANGE,
     SCORE_WEIGHT_TREND,
     DISCORD_PORTFOLIO_WEBHOOK,
+    DISCORD_LONG_SIGNALS_WEBHOOK,
+    DISCORD_SHORT_SIGNALS_WEBHOOK,
 )
 from strategies.long_breakout import (
     TrendResult,

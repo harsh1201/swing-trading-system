@@ -527,13 +527,90 @@ def test_rank_label():
 def test_score_bar():
     """Test score bar function."""
     from screener import _score_bar
-    
+
     bar = _score_bar(50.0)
     assert "50.0" in bar
     assert "100" in bar
-    
+
     bar = _score_bar(100.0)
     assert "100.0" in bar
-    
+
     bar = _score_bar(0.0)
     assert "0.0" in bar
+
+
+def test_format_signal_for_discord():
+    """Test Discord signal formatting."""
+    from screener import format_signal_for_discord
+
+    setup = {
+        "ticker": "TEST.NS",
+        "setup": {
+            "entry": 100.0,
+            "stop_loss": 95.0,
+            "target": 110.0,
+            "risk_pct": 5.0,
+        },
+        "score": {"total": 65.5},
+        "strategy": "long_breakout",
+        "signal_date": "21-04-2026",
+    }
+
+    result = format_signal_for_discord(setup, 1)
+
+    assert "TEST" in result
+    assert "#1" in result
+    assert "100" in result
+    assert "95" in result
+    assert "110" in result
+    assert "65.5" in result
+    assert "LONG" in result
+
+
+def test_format_signal_for_discord_short():
+    """Test Discord short signal formatting."""
+    from screener import format_signal_for_discord
+
+    setup = {
+        "ticker": "SHORT.NS",
+        "setup": {
+            "entry": 200.0,
+            "stop_loss": 210.0,
+            "target": 180.0,
+            "risk_pct": 5.0,
+        },
+        "score": {"total": 55.0},
+        "strategy": "short_breakout",
+        "signal_date": "21-04-2026",
+    }
+
+    result = format_signal_for_discord(setup, 1)
+
+    assert "SHORT" in result
+    assert "200" in result
+    assert "210" in result
+    assert "180" in result
+
+
+def test_send_signals_to_discord_no_webhook(monkeypatch):
+    """Test send_signals_to_discord returns early when no webhook."""
+    import screener
+    from screener import send_signals_to_discord
+
+    monkeypatch.setattr(screener, "DISCORD_LONG_SIGNALS_WEBHOOK", "")
+    setups = [
+        {"ticker": "TEST.NS", "setup": {"entry": 100, "stop_loss": 95, "target": 110, "risk_pct": 5}, "score": {"total": 50}, "strategy": "long_breakout"}
+    ]
+
+    result = send_signals_to_discord(setups, "long_breakout")
+    assert result is None
+
+
+def test_send_signals_to_discord_empty_setups(monkeypatch):
+    """Test send_signals_to_discord returns early when no setups."""
+    import screener
+    from screener import send_signals_to_discord
+
+    monkeypatch.setattr(screener, "DISCORD_LONG_SIGNALS_WEBHOOK", "https://example.com/webhook")
+    result = send_signals_to_discord([], "long_breakout")
+    assert result is None
