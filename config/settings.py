@@ -143,6 +143,10 @@ SCORE_WEIGHT_TREND = 40   # Trend component (sweet spot above EMA50 = higher sco
 VOLUME_AVG_PERIOD = 20    # rolling baseline window (bars before current bar)
 VOLUME_MIN_RATIO  = 1.0   # latest volume must be >= this multiple of the avg (1.0 = no surge required)
 
+# ── Candle Strength filter (Tested Apr 2026) ─────────────────────────
+MIN_CANDLE_STRENGTH = 0.65   # breakout candle must close in top 65% of range (for longs), bottom 65% (for shorts)
+                              # 0.65 = strong close, 0.0 = weak (no filter), 1.0 = full body candle
+
 # ── Gap-up filter (screener) ───────────────────────────────────────────────────
 GAP_UP_THRESHOLD = 1.02   # today's open > entry × threshold → invalid
 

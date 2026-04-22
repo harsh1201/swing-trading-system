@@ -86,6 +86,7 @@ from strategies.long_breakout import (
     check_liquidity,
     check_trend,
     check_volume,
+    check_candle_strength,
     get_market_regime,
     score_long_breakout,
     calculate_atr,
@@ -233,6 +234,11 @@ def scan_candidates(
 
         vol = check_volume(df, idx)
         if vol is None:
+            continue
+
+        # Candle strength filter (breakout quality)
+        candle = check_candle_strength(df, idx)
+        if candle is None:
             continue
 
         entry = coil["period_high"]
@@ -959,6 +965,12 @@ def scan_candidates_short(
 
         vol = check_volume(df, idx)
         if vol is None:
+            continue
+
+        # Candle strength filter for short (breakout quality)
+        from strategies.short_breakout import check_candle_strength_short
+        candle = check_candle_strength_short(df, idx)
+        if candle is None:
             continue
 
         # Short: entry = period_low, SL = period_high

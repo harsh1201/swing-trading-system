@@ -79,6 +79,7 @@ from strategies.long_breakout import (
     ConsolidationResult,
     TradeSetupResult,
     VolumeResult,
+    CandleStrengthResult,
     GapUpResult,
     ScoreResult,
     add_indicators,
@@ -86,6 +87,7 @@ from strategies.long_breakout import (
     check_trend,
     check_consolidation,
     check_volume,
+    check_candle_strength,
     check_liquidity,
     check_gap_up,
     score_long_breakout,
@@ -946,7 +948,7 @@ def run_screener() -> None:
     total   = len(STOCKS)
     today   = datetime.today()
     scanned = skipped = earnings_skipped = 0
-    ema_passed = coil_passed = risk_passed = vol_passed = 0
+    ema_passed = coil_passed = risk_passed = vol_passed = candle_passed = 0
     final_setups: list[ScreenerSetup] = []
 
     # ── Header ────────────────────────────────────────────────────────────────
@@ -1070,7 +1072,16 @@ def run_screener() -> None:
 
         vol_passed += 1
 
-        # Stage 3c — gap-up
+        # Stage 3c — candle strength (filter weak close)
+        candle = check_candle_strength(df)
+        if candle is None:
+            if not LIVE_MODE:
+                print("trend+coil+risk+vol ok | weak candle  -> filtered")
+            continue
+
+        candle_passed += 1
+
+        # Stage 3d — gap-up
         gap = check_gap_up(df, setup["entry"])
         if gap["is_gap_up"]:
             if not LIVE_MODE:
@@ -1134,6 +1145,7 @@ def run_screener() -> None:
         print(f"  Passed Stage 2  (Coil)        : {coil_passed}")
         print(f"  Passed Stage 3a (Risk)        : {risk_passed}")
         print(f"  Passed Stage 3b (Volume)      : {vol_passed}")
+        print(f"  Passed Stage 3c (Candle)     : {candle_passed}")
         print(f"  Skipped Stage 3d (Earnings)   : {earnings_skipped}")
         print(f"  Passed all stages             : {len(final_setups)}")
 
@@ -1399,7 +1411,7 @@ def run_screener_short() -> None:
     total   = len(STOCKS)
     today   = datetime.today()
     scanned = skipped = earnings_skipped = 0
-    ema_passed = coil_passed = risk_passed = vol_passed = 0
+    ema_passed = coil_passed = risk_passed = vol_passed = candle_passed = 0
     final_setups: list[dict] = []
 
     # ── Header ────────────────────────────────────────────────────────────────
@@ -1520,7 +1532,17 @@ def run_screener_short() -> None:
 
         vol_passed += 1
 
-        # Stage 3c — gap-down guard
+        # Stage 3c — candle strength (filter weak close)
+        from strategies.short_breakout import check_candle_strength_short
+        candle = check_candle_strength_short(df)
+        if candle is None:
+            if not LIVE_MODE:
+                print("trend+coil+risk+vol ok | weak candle  -> filtered")
+            continue
+
+        candle_passed += 1
+
+        # Stage 3d — gap-down guard
         gap = check_gap_down(df, setup["entry"])
         if gap["is_gap_down"]:
             if not LIVE_MODE:
@@ -1528,7 +1550,7 @@ def run_screener_short() -> None:
                       f"  gapped {gap['gap_pct']:.2f}% below entry  -> invalid (gap-down)")
             continue
 
-        # Stage 3d — earnings blackout
+        # Stage 3e — earnings blackout
         e_dates = get_earnings_dates(ticker)
         if is_near_earnings(e_dates, today):
             earnings_skipped += 1
@@ -1584,6 +1606,7 @@ def run_screener_short() -> None:
         print(f"  Passed Stage 2  (Coil near low)  : {coil_passed}")
         print(f"  Passed Stage 3a (Risk)           : {risk_passed}")
         print(f"  Passed Stage 3b (Volume)         : {vol_passed}")
+        print(f"  Passed Stage 3c (Candle)         : {candle_passed}")
         print(f"  Skipped Stage 3d (Earnings)      : {earnings_skipped}")
         print(f"  Passed all stages                : {len(final_setups)}")
 

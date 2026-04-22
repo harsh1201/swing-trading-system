@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added (2026-04-22)
+- **Candle Strength Filter**: New breakout quality filter
+  - MIN_CANDLE_STRENGTH = 0.65 (breakout candle must close in top 65% of range)
+  - For longs: strength = (close - low) / (high - low)
+  - For shorts: strength = (high - close) / (high - low)
+  - Added check_candle_strength() in strategies
+  - Stage 3c filter in screener (both long and short)
+  - Backtest now applies candle strength filter
+
+### Changed (2026-04-22)
 - **Portfolio Score**: Track setup score at entry time
   - Added `score` field to PortfolioTrade TypedDict
   - `add_to_portfolio()` accepts score parameter
@@ -13,6 +22,7 @@ All notable changes to this project will be documented in this file.
 - **backtest.py --no-refresh flag**: Toggle to use cached data
   - Default: refresh=True (always download fresh data)
   - --no-refresh: Use cached data only for faster re-runs
+- **Short score display fix**: Changed hardcoded weights (40/35/25) to config values (30/30/40)
 - **Short Score Display Fix**: Changed hardcoded weights (40/35/25) to config values (30/30/40)
   - Fixed in screener.py:1247, 1249, 1260
   - Previously LONG was fixed in v1.8, SHORT was missed

@@ -47,6 +47,7 @@ from config.settings import (
     SCORE_WEIGHT_TREND,
     VOLUME_AVG_PERIOD,
     VOLUME_MIN_RATIO,
+    MIN_CANDLE_STRENGTH,
     GAP_UP_THRESHOLD,
     MIN_AVG_VOLUME,
     MIN_AVG_TURNOVER,
@@ -83,6 +84,13 @@ class VolumeResult(TypedDict):
     latest_volume: int
     avg_volume: int
     surge_ratio: float
+
+
+class CandleStrengthResult(TypedDict):
+    strength: float
+    close: float
+    low: float
+    high: float
 
 
 class GapDownResult(TypedDict):
@@ -284,6 +292,46 @@ def check_consolidation_short(df: pd.DataFrame, idx: int = -1) -> ConsolidationR
 
 
 # ── Stage 3b: Gap-down guard (screener only) ────────────────────────────────
+
+def check_candle_strength_short(df: pd.DataFrame, idx: int = -1) -> CandleStrengthResult | None:
+    """
+    Measure breakout candle strength using close position within the bar's range.
+
+    For SHORT breakout: close should be in bottom portion of range
+    strength = (high - close) / (high - low)
+    (inverted: higher = better for shorts = close near low)
+
+    idx = -1 → latest bar.
+
+    Returns {"strength", "close", "low", "high"} or None if strength < MIN_CANDLE_STRENGTH.
+    """
+    if idx == -1:
+        idx = len(df) - 1
+
+    if idx < 1:
+        return None
+
+    row = df.iloc[idx]
+    low = float(row["Low"])
+    high = float(row["High"])
+    close = float(row["Close"])
+
+    if high == low:
+        return None
+
+    # For shorts: higher = better (close near low = strong)
+    strength = (high - close) / (high - low)
+
+    if MIN_CANDLE_STRENGTH > 0 and strength < MIN_CANDLE_STRENGTH:
+        return None
+
+    return {
+        "strength": round(strength, 2),
+        "close": close,
+        "low": low,
+        "high": high,
+    }
+
 
 def check_gap_down(
     df: pd.DataFrame,

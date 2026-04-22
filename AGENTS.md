@@ -1,7 +1,7 @@
 # AGENTS.md - Swing Trading System Context
 
 > **Last Updated:** 2026-04-22
-> **Version:** 1.12 (Score Display Fixed + Portfolio Score)
+> **Version:** 1.13 (Candle Strength Filter)
 > **Maintainer:** Project Owner
 
 ---
@@ -270,6 +270,32 @@ Portfolio summary auto-posts to Discord when screener runs.
 ---
 
 ## Changelog
+
+### 2026-04-22 (v1.13 - Candle Strength Filter)
+
+### Added
+- **Candle Strength Filter**: Filters breakouts based on close position within the bar's range
+  - For longs: strength = (close - low) / (high - low) - must be >= MIN_CANDLE_STRENGTH (0.65)
+  - For shorts: strength = (high - close) / (high - low) - must be >= MIN_CANDLE_STRENGTH (0.65)
+  - Added `MIN_CANDLE_STRENGTH = 0.65` in config/settings.py
+  - Added `check_candle_strength()` in both long_breakout.py and short_breakout.py
+  - Filters weak breakouts where close is near low (for longs) or near high (for shorts)
+
+- **Candle filter in backtest**: Both long and short backtests now use the candle strength filter
+
+- **Candle filter in screener**: New Stage 3c for candle strength in both long and short scans
+
+### Configuration
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| MIN_CANDLE_STRENGTH | 0.65 | Breakout candle must close in top 65% of range |
+
+### Purpose
+- Filters weak breakouts where price stalls at breakout level
+- Complementary to volume filter (volume = quantity, candle = quality)
+- Harder to fake than volume alone
+
+---
 
 ### 2026-04-22 (v1.12 - Score Display Fixed + Portfolio Score)
 
