@@ -1,7 +1,7 @@
 # AGENTS.md - Swing Trading System Context
 
 > **Last Updated:** 2026-04-22
-> **Version:** 1.13 (Candle Strength Filter)
+> **Version:** 1.14 (Candle Strength DISABLED)
 > **Maintainer:** Project Owner
 
 ---
@@ -271,29 +271,26 @@ Portfolio summary auto-posts to Discord when screener runs.
 
 ## Changelog
 
-### 2026-04-22 (v1.13 - Candle Strength Filter)
+### 2026-04-22 (v1.14 - Candle Strength DISABLED)
 
-### Added
-- **Candle Strength Filter**: Filters breakouts based on close position within the bar's range
-  - For longs: strength = (close - low) / (high - low) - must be >= MIN_CANDLE_STRENGTH (0.65)
-  - For shorts: strength = (high - close) / (high - low) - must be >= MIN_CANDLE_STRENGTH (0.65)
-  - Added `MIN_CANDLE_STRENGTH = 0.65` in config/settings.py
-  - Added `check_candle_strength()` in both long_breakout.py and short_breakout.py
-  - Filters weak breakouts where close is near low (for longs) or near high (for shorts)
+### Changed
+- **Candle Strength Filter DISABLED**: After testing, the candle filter hurt performance:
+  - LONGS: 598 trades → 440 trades (-26%), WR 30.6% → 25.0%, P&L +653% → +169% (-74% drop)
+  - Filter too restrictive - rejected too many valid setups
+  - Reverted to v1.12 logic (candle filter disabled)
+- MIN_CANDLE_STRENGTH set to 0 (disabled) in config/settings.py
+- Commented out candle filter calls in backtest.py and screener.py
 
-- **Candle filter in backtest**: Both long and short backtests now use the candle strength filter
+### Backtest Results Comparison
+| Strategy | Candle Filter | Trades | WR | P&L | Max DD |
+|----------|-------------|--------|-------|-------|-------|
+| Long | No (v1.12) | 598 | 30.6% | +653% | 6.3% |
+| Long | Yes (v1.13) | 440 | 25.0% | +169% | 6.8% |
 
-- **Candle filter in screener**: New Stage 3c for candle strength in both long and short scans
-
-### Configuration
-| Parameter | Value | Description |
-|-----------|-------|-------------|
-| MIN_CANDLE_STRENGTH | 0.65 | Breakout candle must close in top 65% of range |
-
-### Purpose
-- Filters weak breakouts where price stalls at breakout level
-- Complementary to volume filter (volume = quantity, candle = quality)
-- Harder to fake than volume alone
+### Lesson Learned
+- Quality filters can hurt when baseline is already good
+- The breakout logic was already filtering weak setups effectively
+- Adding more filters reduced opportunity without improving risk-adjusted returns
 
 ---
 

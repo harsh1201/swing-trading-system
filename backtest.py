@@ -236,10 +236,10 @@ def scan_candidates(
         if vol is None:
             continue
 
-        # Candle strength filter (breakout quality)
-        candle = check_candle_strength(df, idx)
-        if candle is None:
-            continue
+        # Candle strength filter (DISABLED Apr 2022 - hurt performance)
+        # candle = check_candle_strength(df, idx)
+        # if candle is None:
+        #     continue
 
         entry = coil["period_high"]
         stop_loss = coil["period_low"]
@@ -967,11 +967,11 @@ def scan_candidates_short(
         if vol is None:
             continue
 
-        # Candle strength filter for short (breakout quality)
-        from strategies.short_breakout import check_candle_strength_short
-        candle = check_candle_strength_short(df, idx)
-        if candle is None:
-            continue
+        # Candle strength filter for short (DISABLED Apr 2022 - hurt performance)
+        # from strategies.short_breakout import check_candle_strength_short
+        # candle = check_candle_strength_short(df, idx)
+        # if candle is None:
+        #     continue
 
         # Short: entry = period_low, SL = period_high
         entry = coil["period_low"]

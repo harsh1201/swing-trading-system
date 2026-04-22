@@ -1072,14 +1072,13 @@ def run_screener() -> None:
 
         vol_passed += 1
 
-        # Stage 3c — candle strength (filter weak close)
-        candle = check_candle_strength(df)
-        if candle is None:
-            if not LIVE_MODE:
-                print("trend+coil+risk+vol ok | weak candle  -> filtered")
-            continue
-
-        candle_passed += 1
+        # Stage 3c — candle strength (DISABLED Apr 2022 - hurt performance)
+        # candle = check_candle_strength(df)
+        # if candle is None:
+        #     if not LIVE_MODE:
+        #         print("trend+coil+risk+vol ok | weak candle  -> filtered")
+        #     continue
+        # candle_passed += 1
 
         # Stage 3d — gap-up
         gap = check_gap_up(df, setup["entry"])
@@ -1532,15 +1531,14 @@ def run_screener_short() -> None:
 
         vol_passed += 1
 
-        # Stage 3c — candle strength (filter weak close)
-        from strategies.short_breakout import check_candle_strength_short
-        candle = check_candle_strength_short(df)
-        if candle is None:
-            if not LIVE_MODE:
-                print("trend+coil+risk+vol ok | weak candle  -> filtered")
-            continue
-
-        candle_passed += 1
+        # Stage 3c — candle strength (DISABLED Apr 2022 - hurt performance)
+        # from strategies.short_breakout import check_candle_strength_short
+        # candle = check_candle_strength_short(df)
+        # if candle is None:
+        #     if not LIVE_MODE:
+        #         print("trend+coil+risk+vol ok | weak candle  -> filtered")
+        #     continue
+        # candle_passed += 1
 
         # Stage 3d — gap-down guard
         gap = check_gap_down(df, setup["entry"])

@@ -5,13 +5,19 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added (2026-04-22)
-- **Candle Strength Filter**: New breakout quality filter
-  - MIN_CANDLE_STRENGTH = 0.65 (breakout candle must close in top 65% of range)
+- **Candle Strength Filter**: TESTED AND DISABLED (hurt performance)
+  - MIN_CANDLE_STRENGTH = 0 initially, now set to 0 (disabled)
   - For longs: strength = (close - low) / (high - low)
   - For shorts: strength = (high - close) / (high - low)
   - Added check_candle_strength() in strategies
-  - Stage 3c filter in screener (both long and short)
-  - Backtest now applies candle strength filter
+
+### DISABLED (2026-04-22)
+- **Candle Strength Filter DISABLED**: After testing, filter hurt performance
+  - LONGS: 598 trades → 440 trades (-26%), WR 30.6% → 25.0%, P&L +653% → +169% (-74% drop)
+  - Filter too restrictive - rejected too many valid setups
+  - Reverted to v1.12 logic (candle filter disabled)
+  - MIN_CANDLE_STRENGTH set to 0 in config/settings.py
+  - Commented out candle filter calls in backtest.py and screener.py
 
 ### Changed (2026-04-22)
 - **Portfolio Score**: Track setup score at entry time
