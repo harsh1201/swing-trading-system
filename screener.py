@@ -207,15 +207,28 @@ def format_trade_row(t: dict) -> str:
         emoji = "✅" if outcome == "WIN" else "❌" if outcome == "LOSS" else "➖"
         days_info = f" | {emoji}"
     
-    entry_str = f"₹{entry:,.0f}" if entry else "-"
-    sl_str = f"₹{sl:,.0f}" if sl else "-"
-    target_str = f"₹{target:,.0f}" if target else "-"
-    curr_str = f"₹{curr_price:,.0f}" if curr_price else "-"
-    r_str = f"{r_val:+.2f}R" if r_val != 0 else "-"
+    entry_str = f"₹{entry:,.0f}" if entry and entry > 0 else "--"
+    sl_str = f"₹{sl:,.0f}" if sl and sl > 0 else "--"
+    target_str = f"₹{target:,.0f}" if target and target > 0 else "--"
+    curr_str = f"₹{curr_price:,.0f}" if curr_price and curr_price > 0 else "--"
+    r_str = f"{r_val:+.2f}R" if r_val != 0 else "--"
     
-    date_info = f"({added_date})" if added_date else ""
+    # Date info - show added for PENDING, triggered for ACTIVE, exit for CLOSED
+    if t["status"] == "PENDING" and added_date:
+        date_info = f"Added: {added_date}{days_info}"
+    elif t["status"] == "ACTIVE" and trigger_date:
+        date_info = f"Trig: {trigger_date}{days_info}"
+    elif t["status"] == "CLOSED" and exit_date:
+        date_info = f"Exit: {exit_date}"
+    else:
+        date_info = ""
     
-    return f"{status_emoji} **{ticker}** [{direction}] {date_info}`E:{entry_str} SL:{sl_str} Tgt:{target_str} Curr:{curr_str} R:{r_str}{days_info}`"
+    # Two-line format for better readability
+    line1 = f"{status_emoji} **{ticker}** [{direction}]"
+    line2 = f"   E:{entry_str} | SL:{sl_str} | Tgt:{target_str} | Curr:{curr_str}"
+    line3 = f"   {date_info} | R:{r_str}"
+    
+    return f"{line1}\n{line2}\n{line3}"
 
 
 def format_portfolio_for_discord(trades: List[PortfolioTrade]) -> str:
@@ -300,7 +313,7 @@ def format_signal_for_discord(setup: dict, rank: int) -> str:
     ticker = setup["ticker"].replace(".NS", "")
     score = setup["score"]
     
-    direction = "LONG" if "breakout" in setup.get("strategy", "") else "SHORT"
+    direction = "LONG" if setup.get("strategy") == "long_breakout" else "SHORT"
     emoji = "🟢" if direction == "LONG" else "🔴"
     
     lines = []
@@ -567,9 +580,9 @@ def print_execution_summary(
         "STRONG_BULL": ("✅", "STRONG BULL — full capacity"),
         "EARLY_TREND": ("⚡", "EARLY TREND — reduced capacity"),
         "BEAR":        ("🚫", "BEAR — no trades today"),
-        "UNKNOWN":     ("❓", "unknown — proceeding with caution"),
+        "UNKNOWN":     ("⚪", "REGIME OFF — all conditions allowed"),
     }
-    r_icon, r_text = _reg_display.get(regime_label, ("❓", regime_label))
+    r_icon, r_text = _reg_display.get(regime_label, ("⚪", "REGIME OFF"))
     print(f"  Market regime      {r_icon}  {r_text}")
     min_cr = MIN_AVG_TURNOVER // 1_00_00_000
     print(f"  Liquidity filter   ✅  active (min Rs.{min_cr} Cr avg daily turnover)")
@@ -1321,12 +1334,12 @@ def print_execution_summary_short(
     print("=" * width)
 
     _reg_display = {
-        "STRONG_BEAR": ("✅", "STRONG BEAR — full short capacity"),
-        "EARLY_BEAR":  ("⚡", "EARLY BEAR — reduced short capacity"),
-        "BULL":        ("🚫", "BULL — no short trades today"),
-        "UNKNOWN":     ("❓", "unknown — proceeding with caution"),
+        "STRONG_BEAR": ("✅", "STRONG BEAR — full capacity"),
+        "EARLY_BEAR": ("⚡", "EARLY BEAR — reduced capacity"),
+        "BULL":        ("🚫", "BULL — no shorts today"),
+        "UNKNOWN":     ("⚪", "REGIME OFF — all conditions allowed"),
     }
-    r_icon, r_text = _reg_display.get(regime_label, ("❓", regime_label))
+    r_icon, r_text = _reg_display.get(regime_label, ("⚪", "REGIME OFF"))
     print(f"  Market regime      {r_icon}  {r_text}")
     min_cr = MIN_AVG_TURNOVER // 1_00_00_000
     print(f"  Liquidity filter   ✅  active (min Rs.{min_cr} Cr avg daily turnover)")

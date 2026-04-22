@@ -1,7 +1,7 @@
 # 📈 NSE India Swing Trading System
 
 > A rule-based, statistically validated swing trading framework for the Indian stock market (NSE).
-> **Version:** 1.7 (2026-04-21)
+> **Version:** 1.10 (2026-04-22)
 
 ---
 

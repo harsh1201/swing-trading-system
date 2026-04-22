@@ -14,7 +14,7 @@ Strategy summary
   Stage 3  Volume filter  : latest volume >= VOLUME_MIN_RATIO × 20-bar avg
   Stage 3b Gap-up filter  : today's open must not have gapped > GAP_UP_THRESHOLD
                             above the entry level  [screener only]
-  Scoring                 : Risk(40) + Range(35) + Trend(25)  → 0–100
+  Scoring                 : Risk(30) + Range(30) + Trend(40)  → 0–100
   Trade plan              : entry = period_high,  SL = period_low,
                             target = entry + REWARD_RATIO × risk
 """
@@ -26,14 +26,22 @@ from typing import TypedDict
 import pandas as pd
 
 from config.settings import (
+    ATR_PERIOD,
     EMA_ULTRA_SHORT,
     EMA_SHORT,
     EMA_LONG,
+    USE_ALTERNATIVE_EMA,
+    ALT_EMA_SHORT,
+    ALT_EMA_LONG,
+    REQUIRE_BOTH_EMAS,
     COIL_CANDLES,
     MAX_RANGE_PCT,
     NEAR_HIGH_PCT,
     REWARD_RATIO,
     MAX_RISK_PCT,
+    SCORE_WEIGHT_RISK,
+    SCORE_WEIGHT_RANGE,
+    SCORE_WEIGHT_TREND,
     VOLUME_AVG_PERIOD,
     VOLUME_MIN_RATIO,
     GAP_UP_THRESHOLD,
@@ -90,15 +98,49 @@ class TradeSetupResult(TypedDict):
 
 # ── Indicator helpers ─────────────────────────────────────────────────────────
 
+def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    """
+    Calculate Average True Range (ATR) for the given DataFrame.
+    ATR = Average of True Range over 'period' bars.
+    True Range = max(High-Low, |High-PrevClose|, |Low-PrevClose|)
+    """
+    required_cols = {"High", "Low", "Close"}
+    if not required_cols.issubset(df.columns):
+        return pd.Series([pd.NA] * len(df), index=df.index)
+    
+    high = df["High"]
+    low = df["Low"]
+    close = df["Close"]
+    
+    prev_close = close.shift(1)
+    
+    tr1 = high - low
+    tr2 = (high - prev_close).abs()
+    tr3 = (low - prev_close).abs()
+    
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(window=period).mean()
+    
+    return atr
+
+
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Return a copy of df with EMA20, EMA50 and EMA200 columns appended.
+    Return a copy of df with EMA20, EMA50, EMA200 and ATR columns appended.
+    Also calculates alternative EMAs if USE_ALTERNATIVE_EMA is enabled.
     Must be called before any check_* or is_market_bullish().
     """
     df = df.copy()
     df["EMA20"]  = df["Close"].ewm(span=EMA_ULTRA_SHORT, adjust=False).mean()
     df["EMA50"]  = df["Close"].ewm(span=EMA_SHORT,       adjust=False).mean()
     df["EMA200"] = df["Close"].ewm(span=EMA_LONG,        adjust=False).mean()
+    
+    # Calculate alternative EMAs if enabled
+    if USE_ALTERNATIVE_EMA:
+        df[f"EMA{ALT_EMA_SHORT}"] = df["Close"].ewm(span=ALT_EMA_SHORT, adjust=False).mean()
+        df[f"EMA{ALT_EMA_LONG}"] = df["Close"].ewm(span=ALT_EMA_LONG, adjust=False).mean()
+    
+    df["ATR"]    = calculate_atr(df, ATR_PERIOD)
     return df
 
 
@@ -174,21 +216,38 @@ def check_trend(df: pd.DataFrame, idx: int = -1) -> TrendResult | None:
     """
     Evaluate the trend at bar `idx` (default: latest bar).
 
-    Condition: close > EMA50 > EMA200
+    Condition: close > EMA50 > EMA200 (default)
+    Or alternative: close > ALT_EMA_SHORT > ALT_EMA_LONG (when USE_ALTERNATIVE_EMA=True)
+    Or just: close > EMA50 (when REQUIRE_BOTH_EMAS=False)
 
     Returns a dict  {"close", "ema50", "ema200"}  or  None if condition fails.
     Requires add_indicators() to have been called on df first.
     """
     row   = df.iloc[idx]
     close = float(row["Close"])
-    ema50 = float(row["EMA50"])
-    ema200= float(row["EMA200"])
-    if not (close > ema50 > ema200):
-        return None
+    
+    # Determine which EMA columns to use based on config
+    if USE_ALTERNATIVE_EMA:
+        short_ema = float(row[f"EMA{ALT_EMA_SHORT}"])
+        long_ema = float(row[f"EMA{ALT_EMA_LONG}"])
+    else:
+        short_ema = float(row["EMA50"])
+        long_ema = float(row["EMA200"])
+    
+    # Check trend condition
+    if REQUIRE_BOTH_EMAS:
+        # Default: close > EMA50 > EMA200
+        if not (close > short_ema > long_ema):
+            return None
+    else:
+        # Alternative: close > EMA50 only (skip EMA200 check)
+        if not (close > short_ema):
+            return None
+    
     return {
         "close": round(float(close),  2),
-        "ema50": round(float(ema50),  2),
-        "ema200":round(float(ema200), 2),
+        "ema50": round(float(short_ema), 2),
+        "ema200":round(float(long_ema), 2),
     }
 
 
@@ -339,26 +398,26 @@ def check_liquidity(df: pd.DataFrame, idx: int = -1) -> bool:
 
 def _trend_score(ema50_gap_pct: float) -> float:
     """
-    Piecewise score (0–25 pts) for how far close sits above EMA50.
+    Piecewise score (0–SCORE_WEIGHT_TREND pts) for how far close sits above EMA50.
 
     Zone              Gap           Score
     ──────────────────────────────────────────────────────
     Below EMA50       < 0 %         0
-    Too close         0 – 1 %       0 → 25   (linear ramp)
-    Sweet spot        1 – 4 %       25       (full marks)
-    Mild extension    4 – 6 %       25 → 12.5 (linear drop)
-    Overextended      > 6 %         12.5 → 0  (linear penalty, floor 0)
+    Too close         0 – 1 %       0 → SCORE_WEIGHT_TREND   (linear ramp)
+    Sweet spot        1 – 4 %       SCORE_WEIGHT_TREND       (full marks)
+    Mild extension    4 – 6 %       SCORE_WEIGHT_TREND → SCORE_WEIGHT_TREND/2 (linear drop)
+    Overextended      > 6 %         SCORE_WEIGHT_TREND/2 → 0  (linear penalty, floor 0)
     """
     if ema50_gap_pct < 0:
         return 0.0
     elif ema50_gap_pct < 1.0:
-        return ema50_gap_pct * 25.0
+        return ema50_gap_pct * SCORE_WEIGHT_TREND
     elif ema50_gap_pct <= 4.0:
-        return 25.0
+        return SCORE_WEIGHT_TREND
     elif ema50_gap_pct <= 6.0:
-        return 25.0 - ((ema50_gap_pct - 4.0) / 2.0) * 12.5
+        return SCORE_WEIGHT_TREND - ((ema50_gap_pct - 4.0) / 2.0) * (SCORE_WEIGHT_TREND / 2)
     else:
-        return max(0.0, 12.5 - ((ema50_gap_pct - 6.0) / 6.0) * 12.5)
+        return max(0.0, (SCORE_WEIGHT_TREND / 2) - ((ema50_gap_pct - 6.0) / 6.0) * (SCORE_WEIGHT_TREND / 2))
 
 
 def score_long_breakout(trend: TrendResult, coil: ConsolidationResult) -> ScoreResult:
@@ -367,16 +426,16 @@ def score_long_breakout(trend: TrendResult, coil: ConsolidationResult) -> ScoreR
 
       Component   Weight   Driver
       ─────────────────────────────────────────────
-      Risk         40 pts  tighter coil → lower risk → higher score
-      Range        35 pts  smaller range_pct → higher score
-      Trend        25 pts  piecewise curve; sweet spot 1–4% above EMA50
+      Risk         30 pts  tighter coil → lower risk → higher score
+      Range        30 pts  smaller range_pct → higher score
+      Trend        40 pts  piecewise curve; sweet spot 1–4% above EMA50
 
     Returns {"total", "risk_score", "range_score", "trend_score", "ema50_gap_pct"}.
     """
     # Risk score: derived from how wide the coil box is relative to entry
     risk_pct   = (coil["period_high"] - coil["period_low"]) / coil["period_high"] * 100
-    risk_score  = max(0.0, (MAX_RISK_PCT - risk_pct)                    / MAX_RISK_PCT    * 40)
-    range_score = max(0.0, (MAX_RANGE_PCT - coil["range_pct"])          / MAX_RANGE_PCT   * 35)
+    risk_score  = max(0.0, (MAX_RISK_PCT - risk_pct)                    / MAX_RISK_PCT    * SCORE_WEIGHT_RISK)
+    range_score = max(0.0, (MAX_RANGE_PCT - coil["range_pct"])          / MAX_RANGE_PCT   * SCORE_WEIGHT_RANGE)
 
     ema50_gap_pct = (trend["close"] - trend["ema50"]) / trend["ema50"] * 100
     trend_sc      = _trend_score(ema50_gap_pct)

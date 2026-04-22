@@ -4,6 +4,44 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Tested
+- **EMA trailing exit comparison**:
+  - EMA20 (baseline): 667 trades, 29.2% WR, +576% P&L, 7.69% Max DD
+  - EMA15: 743 trades, 26.8% WR, +652% P&L, 14.48% Max DD
+  - Conclusion: EMA15 has higher returns but 2x drawdown risk. Reverted to EMA20.
+
+- **REWARD_RATIO (target) comparison**:
+  - RR 1.5: 792 trades, 38.0% WR, +540% P&L
+  - RR 2.0 (baseline): 667 trades, 29.2% WR, +576% P&L, 7.69% Max DD
+  - RR 2.5: 618 trades, 20.7% WR, +374% P&L
+  - Conclusion: RR 2.0 is the sweet spot - best balance of win rate and returns.
+
+- **ATR trailing exit comparison**:
+  - ATR 1.5×: 921 trades, 16.8% WR, +659% P&L, 10.58% Max DD
+  - ATR 2.0×: 688 trades, 26.7% WR, +519% P&L, 16.02% Max DD
+  - ATR 2.5×: 524 trades, 35.1% WR, +502% P&L, 12.52% Max DD
+  - ATR 3.0×: 469 trades, 40.3% WR, +542% P&L, 10.00% Max DD
+  - Conclusion: ATR does not outperform EMA20. EMA20 has lowest drawdown and best risk-adjusted returns.
+
+- **EMA Stage 1 trend filter comparison** (2026-04-22):
+  - EMA50 > EMA200 (baseline): 658 trades, 28.9% WR, +552% P&L, 7.69% Max DD
+  - EMA50 only (skip EMA200): 674 trades, 29.7% WR, +701% P&L, 9.48% Max DD
+  - EMA100 > EMA200: 691 trades, 29.4% WR, +643% P&L, 9.82% Max DD
+  - EMA50 > EMA150: 658 trades, 28.7% WR, +545% P&L, 8.77% Max DD
+  - Conclusion: EMA50>EMA200 remains optimal - lowest drawdown with similar risk-adjusted returns
+
+### Added
+- **ATR trailing config**: Added `USE_ATR_TRAILING`, `ATR_PERIOD`, `TRAILING_ATR_MULTIPLIER` in config/settings.py
+- **ATR indicator**: Added `calculate_atr()` function in strategies/long_breakout.py
+
+### Fixed
+- **Discord direction bug**: Short trades were showing as LONG in Discord messages
+- **Score weights hardcoded bug**: Score calculations used hardcoded weights (40/35/25) instead of config values (30/30/40)
+- **Discord trade row format**: Improved readability - now 3 lines instead of 1 congested line
+  - Shows "Trig:" for ACTIVE, "Added:" for PENDING, "Exit:" for CLOSED
+  - Uses "--" instead of "-" for empty values
+- **Market regime display**: Changed "❓ unknown" to "⚪ REGIME OFF" when regime is disabled
+
 ---
 
 ## [1.7] - 2026-04-21 (Discord Fix)

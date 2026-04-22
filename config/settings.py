@@ -79,8 +79,19 @@ TICKER_ALIASES: dict[str, str] = {
 
 # ── Indicator periods ──────────────────────────────────────────────────────────
 EMA_ULTRA_SHORT = 20    # fast EMA — used for early-trend regime detection
-EMA_SHORT       = 50
-EMA_LONG        = 200
+EMA_SHORT       = 50    # Stage 1 trend filter (medium-term)
+EMA_LONG        = 200   # Stage 1 trend filter (long-term)
+
+# ── EMA Stage 1 Test Parameters (not adopted - for testing only) ────────────────
+USE_ALTERNATIVE_EMA = False          # True = use alternative EMA config below (for testing)
+ALT_EMA_SHORT = 50                   # Alternative medium-term EMA
+ALT_EMA_LONG = 200                   # Alternative long-term EMA
+REQUIRE_BOTH_EMAS = True              # True = require both EMAs, False = EMA50 only
+
+# ── ATR Trailing Exit ───────────────────────────────────────────────────────────
+USE_ATR_TRAILING = False     # True = ATR-based trailing, False = EMA-based trailing
+ATR_PERIOD = 14              # ATR lookback period
+TRAILING_ATR_MULTIPLIER = 2.0  # Trail stop = highest_high - (multiplier × ATR)
 
 # ── Consolidation / Coil ───────────────────────────────────────────────────────
 COIL_CANDLES  = 10    # look-back window (bars) — more candidates, better performance

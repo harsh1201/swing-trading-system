@@ -1,7 +1,7 @@
 # AGENTS.md - Swing Trading System Context
 
-> **Last Updated:** 2026-04-21  
-> **Version:** 1.7 (Discord Fix)  
+> **Last Updated:** 2026-04-22  
+> **Version:** 1.10 (EMA Testing + Output Improvements)  
 > **Maintainer:** Project Owner
 
 ---
@@ -35,8 +35,24 @@ A rule-based, statistically validated swing trading framework for the Indian sto
 |-----------|-------|-------------|
 | `EMA_SHORT` | 50 | Medium-term trend |
 | `EMA_LONG` | 200 | Long-term trend |
-| `REWARD_RATIO` | 2.0 | 1:2 Risk:Reward |
+| `EMA_ULTRA_SHORT` | 20 | Trailing exit EMA |
+| `REWARD_RATIO` | 2.0 | 1:2 Risk:Reward (tested 1.5, 2.0, 2.5 - 2.0 is optimal) |
 | `GAP_UP_THRESHOLD` | 1.02 | Skip if gap-up > 2% |
+
+### ATR Trailing (Tested - Not Adopted)
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| `USE_ATR_TRAILING` | False | Currently using EMA trailing |
+| `ATR_PERIOD` | 14 | ATR calculation period |
+| `TRAILING_ATR_MULTIPLIER` | 2.0 | Not adopted - EMA20 performs better |
+
+### Parameters Tested (Not Adopted)
+| Parameter | Values Tested | Result |
+|-----------|---------------|--------|
+| `EMA_ULTRA_SHORT` (trailing EMA) | 15, 20 | EMA20 better (7.69% DD vs 14.48%) |
+| `REWARD_RATIO` | 1.5, 2.0, 2.5 | RR 2.0 is optimal |
+| ATR trailing | 1.5×, 2.0×, 2.5×, 3.0× | Does not outperform EMA20 |
+| EMA Stage 1 filter | EMA50>EMA200, EMA50 only, EMA100>EMA200, EMA50>EMA150 | EMA50>EMA200 optimal - lowest DD |
 
 ### Scoring Weight (2026-04-16)
 | Component | Weight | Description |
@@ -247,6 +263,39 @@ Portfolio summary auto-posts to Discord when screener runs.
 
 ## Changelog
 
+### 2026-04-22 (v1.9 - Output Improvements)
+
+### Fixed
+- **Discord trade row format**: Improved readability
+  - Changed from one congested line to 3-line format
+  - Shows "Trig:" for ACTIVE, "Added:" for PENDING, "Exit:" for CLOSED
+  - Uses "--" instead of "-" for empty values
+- **Market regime display**: Changed "❓ unknown" to "⚪ REGIME OFF" when regime is disabled
+  - Both long and short strategy outputs now show clear "REGIME OFF" message
+
+### 2026-04-22 (v1.8 - Bug Fixes)
+
+### Fixed
+- **Discord direction bug**: Short trades were showing as LONG in Discord messages
+  - Root cause: `"breakout" in strategy` matched both long and short
+  - Fixed in `screener.py:303` - now uses `== "long_breakout"`
+- **Score weights hardcoded bug**: Score calculations used hardcoded weights (40/35/25) instead of config values (30/30/40)
+  - Fixed in `strategies/long_breakout.py` and `strategies/short_breakout.py`
+  - Now properly imports and uses `SCORE_WEIGHT_RISK`, `SCORE_WEIGHT_RANGE`, `SCORE_WEIGHT_TREND`
+  - Updated docstrings and tests
+- Added regression tests for score weights using config values
+
+### Added
+- **ATR trailing config**: Added `USE_ATR_TRAILING`, `ATR_PERIOD`, `TRAILING_ATR_MULTIPLIER` (tested, not adopted)
+- **ATR indicator**: Added `calculate_atr()` function in strategies/long_breakout.py
+
+### Tested
+- EMA trailing exit (EMA15 vs EMA20) - EMA20 better (lower DD)
+- REWARD_RATIO (1.5, 2.0, 2.5) - RR 2.0 is optimal
+- ATR trailing exit (1.5x, 2.0x, 2.5x, 3.0x) - does not outperform EMA20
+
+---
+
 ### 2026-04-21 (v1.7 - Discord Fix)
 - Fixed duplicate signal bug: ANURAS.NS showed twice in screener (once as ACTIVE portfolio, once as new signal)
 - Added portfolio ticker skip: skips PENDING/ACTIVE tickers during scan, allows CLOSED for re-entry
@@ -315,19 +364,22 @@ Portfolio summary auto-posts to Discord when screener runs.
 - [x] Portfolio cleanup (PENDING 5 days, CLOSED 15 days, ACTIVE stale 30 days)
 - [x] Portfolio tracking (entry_trigger_date, r_multiple)
 - [x] Comprehensive limitations documented
+- [x] Test EMA trailing exit (EMA15 vs EMA20) - EMA20 better (lower DD)
+- [x] Test REWARD_RATIO (1.5, 2.0, 2.5) - RR 2.0 is optimal
+- [x] Test ATR trailing exit (1.5x, 2.0x, 2.5x, 3.0x) - does not outperform EMA20
 - [ ] Consider moving to Dhan API for live trading
 - [ ] Auto-close ACTIVE positions before earnings announcements
 - [ ] Detect and handle corporate actions (splits, bonuses)
 
-## Test Suite Status (2026-04-20)
+## Test Suite Status (2026-04-21)
 
-**103 tests passing** across all modules:
+**107 tests passing** across all modules:
 - `test_backtest.py`: 9 tests ✓
 - `test_data_cache.py`: 12 tests ✓ (100% coverage)
 - `test_data_earnings.py`: 4 tests ✓
 - `test_long_breakout.py`: 23 tests ✓
-- `test_screener.py`: 40 tests ✓
-- `test_short_breakout.py`: 15 tests ✓
+- `test_screener.py`: 41 tests ✓
+- `test_short_breakout.py`: 18 tests ✓
 
 **Overall coverage: 80%**
 - strategies/long_breakout.py: 100%

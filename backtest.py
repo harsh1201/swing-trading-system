@@ -10,7 +10,7 @@ Pipeline (each day)
   Stage 1  Trend          : stock close > EMA50 > EMA200
   Stage 2  Coil           : range < MAX_RANGE_PCT, close near high
   Stage 3  Volume         : surge ratio >= VOLUME_MIN_RATIO
-  Scoring                 : Risk(40) + Range(35) + Trend(25)
+  Scoring                 : Risk(30) + Range(30) + Trend(40)
 
 Trade mechanics
 ---------------
@@ -52,6 +52,7 @@ except ImportError:
     BACKTEST_VERSIONING = False
 
 from config.settings import (
+    ATR_PERIOD,
     BACKTEST_DAYS,
     BACKTEST_FETCH_DAYS,
     COIL_CANDLES,
@@ -70,6 +71,8 @@ from config.settings import (
     RISK_PER_TRADE,
     SLIPPAGE_PCT,
     STARTING_EQUITY,
+    TRAILING_ATR_MULTIPLIER,
+    USE_ATR_TRAILING,
     VOLUME_AVG_PERIOD,
     WALK_FORWARD_SPLIT_YEAR,
 )
@@ -85,6 +88,7 @@ from strategies.long_breakout import (
     check_volume,
     get_market_regime,
     score_long_breakout,
+    calculate_atr,
 )
 from strategies.short_breakout import (
     check_consolidation_short,
@@ -422,19 +426,46 @@ def run_backtest(
                 still_open.append(trade)
 
             else:
-                ema20 = None
-                if "EMA20" in df.columns:
-                    val = df["EMA20"].iloc[bar]
-                    if not pd.isna(val):
-                        ema20 = float(val)
+                # Trailing exit check
+                trailing_triggered = False
+                exit_price = None
+                exit_date_str = None
 
-                if ema20 is not None and close_bar < ema20:
-                    if bar + 1 < len(df):
-                        exit_price = float(df["Open"].iloc[bar + 1])
-                        exit_date_str = df.index[bar + 1].strftime("%d-%m-%Y")
-                    else:
-                        exit_price = float(df["Close"].iloc[bar])
-                        exit_date_str = df.index[bar].strftime("%d-%m-%Y")
+                if USE_ATR_TRAILING and "ATR" in df.columns:
+                    # ATR-based trailing: exit if close < (highest_high_since_entry - multiplier × ATR)
+                    atr_val = df["ATR"].iloc[bar]
+                    if not pd.isna(atr_val):
+                        # Get highest high since entry
+                        entry_bar = trade.get("entry_bar", bar)
+                        highest_since_entry = float(df["High"].iloc[entry_bar:bar + 1].max())
+                        trailing_stop = highest_since_entry - (TRAILING_ATR_MULTIPLIER * atr_val)
+                        
+                        if close_bar < trailing_stop:
+                            trailing_triggered = True
+                            if bar + 1 < len(df):
+                                exit_price = float(df["Open"].iloc[bar + 1])
+                                exit_date_str = df.index[bar + 1].strftime("%d-%m-%Y")
+                            else:
+                                exit_price = float(df["Close"].iloc[bar])
+                                exit_date_str = df.index[bar].strftime("%d-%m-%Y")
+                else:
+                    # EMA-based trailing (default): exit if close < EMA20
+                    ema20 = None
+                    if "EMA20" in df.columns:
+                        val = df["EMA20"].iloc[bar]
+                        if not pd.isna(val):
+                            ema20 = float(val)
+
+                    if ema20 is not None and close_bar < ema20:
+                        trailing_triggered = True
+                        if bar + 1 < len(df):
+                            exit_price = float(df["Open"].iloc[bar + 1])
+                            exit_date_str = df.index[bar + 1].strftime("%d-%m-%Y")
+                        else:
+                            exit_price = float(df["Close"].iloc[bar])
+                            exit_date_str = df.index[bar].strftime("%d-%m-%Y")
+
+                if trailing_triggered and exit_price is not None:
                     equity += _close(trade, exit_price, "trail", i, closed_trades, exit_date_str)
                 else:
                     still_open.append(trade)
@@ -528,6 +559,7 @@ def run_backtest(
                 "qty": qty,
                 "score": cand["score"],
                 "volume_ratio": cand["volume_ratio"],
+                "entry_bar": next_bar,  # store for ATR trailing
             }
             active_trades.append(new_trade)
             active_tickers.add(cand["ticker"])
@@ -1115,20 +1147,46 @@ def run_backtest_short(
                 still_open.append(trade)
 
             else:
-                # Trailing exit: Close > EMA20 → exit
-                ema20 = None
-                if "EMA20" in df.columns:
-                    val = df["EMA20"].iloc[bar]
-                    if not pd.isna(val):
-                        ema20 = float(val)
+                # Trailing exit check
+                trailing_triggered = False
+                exit_price = None
+                exit_date_str = None
 
-                if ema20 is not None and close_bar > ema20:
-                    if bar + 1 < len(df):
-                        exit_price = float(df["Open"].iloc[bar + 1])
-                        exit_date_str = df.index[bar + 1].strftime("%d-%m-%Y")
-                    else:
-                        exit_price = float(df["Close"].iloc[bar])
-                        exit_date_str = df.index[bar].strftime("%d-%m-%Y")
+                if USE_ATR_TRAILING and "ATR" in df.columns:
+                    # ATR-based trailing for shorts: exit if close > (lowest_low_since_entry + multiplier × ATR)
+                    atr_val = df["ATR"].iloc[bar]
+                    if not pd.isna(atr_val):
+                        # Get lowest low since entry
+                        entry_bar = trade.get("entry_bar", bar)
+                        lowest_since_entry = float(df["Low"].iloc[entry_bar:bar + 1].min())
+                        trailing_stop = lowest_since_entry + (TRAILING_ATR_MULTIPLIER * atr_val)
+                        
+                        if close_bar > trailing_stop:
+                            trailing_triggered = True
+                            if bar + 1 < len(df):
+                                exit_price = float(df["Open"].iloc[bar + 1])
+                                exit_date_str = df.index[bar + 1].strftime("%d-%m-%Y")
+                            else:
+                                exit_price = float(df["Close"].iloc[bar])
+                                exit_date_str = df.index[bar].strftime("%d-%m-%Y")
+                else:
+                    # EMA-based trailing (default): exit if close > EMA20
+                    ema20 = None
+                    if "EMA20" in df.columns:
+                        val = df["EMA20"].iloc[bar]
+                        if not pd.isna(val):
+                            ema20 = float(val)
+
+                    if ema20 is not None and close_bar > ema20:
+                        trailing_triggered = True
+                        if bar + 1 < len(df):
+                            exit_price = float(df["Open"].iloc[bar + 1])
+                            exit_date_str = df.index[bar + 1].strftime("%d-%m-%Y")
+                        else:
+                            exit_price = float(df["Close"].iloc[bar])
+                            exit_date_str = df.index[bar].strftime("%d-%m-%Y")
+
+                if trailing_triggered and exit_price is not None:
                     equity += _close_short(trade, exit_price, "trail", i, closed_trades, exit_date_str)
                     peak_equity = max(peak_equity, equity)
                     drawdown = (peak_equity - equity) / peak_equity if peak_equity > 0 else 0.0
@@ -1221,6 +1279,7 @@ def run_backtest_short(
                 "qty": qty,
                 "score": cand["score"],
                 "volume_ratio": cand["volume_ratio"],
+                "entry_bar": next_bar,  # store for ATR trailing
             }
             active_trades.append(new_trade)
             active_tickers.add(cand["ticker"])
