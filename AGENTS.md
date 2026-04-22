@@ -1,7 +1,7 @@
 # AGENTS.md - Swing Trading System Context
 
 > **Last Updated:** 2026-04-22  
-> **Version:** 1.10 (EMA Testing + Output Improvements)  
+> **Version:** 1.11 (RS Filter Adopted)  
 > **Maintainer:** Project Owner
 
 ---
@@ -46,6 +46,13 @@ A rule-based, statistically validated swing trading framework for the Indian sto
 | `ATR_PERIOD` | 14 | ATR calculation period |
 | `TRAILING_ATR_MULTIPLIER` | 2.0 | Not adopted - EMA20 performs better |
 
+### Relative Strength (RS) Filter (ADOPTED v1.11)
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| `USE_RS_FILTER` | True | RS filter enabled |
+| `RS_LOOKBACK` | 20 | Days to calculate RS |
+| `RS_THRESHOLD` | 0 | Any positive RS for longs, negative for shorts |
+
 ### Parameters Tested (Not Adopted)
 | Parameter | Values Tested | Result |
 |-----------|---------------|--------|
@@ -53,6 +60,7 @@ A rule-based, statistically validated swing trading framework for the Indian sto
 | `REWARD_RATIO` | 1.5, 2.0, 2.5 | RR 2.0 is optimal |
 | ATR trailing | 1.5×, 2.0×, 2.5×, 3.0× | Does not outperform EMA20 |
 | EMA Stage 1 filter | EMA50>EMA200, EMA50 only, EMA100>EMA200, EMA50>EMA150 | EMA50>EMA200 optimal - lowest DD |
+| RS filter | RS>0 (AND), RS>3%, RS>5%, RS AS OR | RS>0 (AND) improves WR, lowers DD, best results |
 
 ### Scoring Weight (2026-04-16)
 | Component | Weight | Description |

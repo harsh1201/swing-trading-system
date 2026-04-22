@@ -82,11 +82,18 @@ EMA_ULTRA_SHORT = 20    # fast EMA — used for early-trend regime detection
 EMA_SHORT       = 50    # Stage 1 trend filter (medium-term)
 EMA_LONG        = 200   # Stage 1 trend filter (long-term)
 
+# ── Relative Strength (RS) Filter ────────────────────────────────────────────────
+USE_RS_FILTER = True           # True = use RS filter (ADOPTED - improves WR, lowers DD)
+RS_LOOKBACK = 20             # Days to calculate RS (20 = ~1 month)
+RS_THRESHOLD = 0             # Stock must beat benchmark by this % (0 = any positive RS)
+RS_AS_OR = False            # True = OR logic with EMA, False = AND logic
+
 # ── EMA Stage 1 Test Parameters (not adopted - for testing only) ────────────────
 USE_ALTERNATIVE_EMA = False          # True = use alternative EMA config below (for testing)
 ALT_EMA_SHORT = 50                   # Alternative medium-term EMA
 ALT_EMA_LONG = 200                   # Alternative long-term EMA
 REQUIRE_BOTH_EMAS = True              # True = require both EMAs, False = EMA50 only
+REQUIRE_BOTH_EMAS = False             # True = require both EMAs, False = EMA50 only
 
 # ── ATR Trailing Exit ───────────────────────────────────────────────────────────
 USE_ATR_TRAILING = False     # True = ATR-based trailing, False = EMA-based trailing

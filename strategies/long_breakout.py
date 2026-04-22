@@ -34,6 +34,10 @@ from config.settings import (
     ALT_EMA_SHORT,
     ALT_EMA_LONG,
     REQUIRE_BOTH_EMAS,
+    USE_RS_FILTER,
+    RS_LOOKBACK,
+    RS_THRESHOLD,
+    RS_AS_OR,
     COIL_CANDLES,
     MAX_RANGE_PCT,
     NEAR_HIGH_PCT,
@@ -124,6 +128,31 @@ def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
     return atr
 
 
+def calculate_rs(df: pd.DataFrame, benchmark_df: pd.DataFrame, lookback: int = 20) -> pd.Series:
+    """
+    Calculate Relative Strength (RS) of stock vs benchmark.
+    RS = Stock Return - Benchmark Return over lookback period.
+    
+    Returns series of RS values (can be positive or negative).
+    """
+    if len(df) < lookback + 1:
+        return pd.Series([pd.NA] * len(df), index=df.index)
+    
+    stock_current = df["Close"]
+    stock_past = df["Close"].shift(lookback)
+    stock_return = ((stock_current / stock_past) - 1) * 100
+    
+    if benchmark_df is not None and len(benchmark_df) >= lookback + 1:
+        benchmark_current = benchmark_df["Close"]
+        benchmark_past = benchmark_df["Close"].shift(lookback)
+        benchmark_return = ((benchmark_current / benchmark_past) - 1) * 100
+        rs = stock_return - benchmark_return
+    else:
+        rs = stock_return
+    
+    return rs
+
+
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """
     Return a copy of df with EMA20, EMA50, EMA200 and ATR columns appended.
@@ -212,15 +241,19 @@ def is_market_bullish(nifty_df: pd.DataFrame, idx: int = -1) -> bool:
 
 # ── Stage 1: Trend ────────────────────────────────────────────────────────────
 
-def check_trend(df: pd.DataFrame, idx: int = -1) -> TrendResult | None:
+def check_trend(df: pd.DataFrame, idx: int = -1, benchmark_df: pd.DataFrame = None) -> TrendResult | None:
     """
     Evaluate the trend at bar `idx` (default: latest bar).
 
     Condition: close > EMA50 > EMA200 (default)
     Or alternative: close > ALT_EMA_SHORT > ALT_EMA_LONG (when USE_ALTERNATIVE_EMA=True)
     Or just: close > EMA50 (when REQUIRE_BOTH_EMAS=False)
-
-    Returns a dict  {"close", "ema50", "ema200"}  or  None if condition fails.
+    
+    RS Filter (when USE_RS_FILTER=True):
+        - AND mode: Requires BOTH EMA trend AND RS > threshold
+        - OR mode: Requires EITHER EMA trend OR RS > threshold
+    
+    Returns a dict  {"close", "ema50", "ema200", "rs"}  or  None if condition fails.
     Requires add_indicators() to have been called on df first.
     """
     row   = df.iloc[idx]
@@ -234,20 +267,44 @@ def check_trend(df: pd.DataFrame, idx: int = -1) -> TrendResult | None:
         short_ema = float(row["EMA50"])
         long_ema = float(row["EMA200"])
     
-    # Check trend condition
+    # Check EMA trend condition
+    ema_passes = False
     if REQUIRE_BOTH_EMAS:
-        # Default: close > EMA50 > EMA200
-        if not (close > short_ema > long_ema):
+        ema_passes = close > short_ema > long_ema
+    else:
+        ema_passes = close > short_ema
+    
+    # Check RS condition
+    rs_passes = True
+    rs_value = 0.0
+    if USE_RS_FILTER:
+        # For backtest: if not enough data for RS, skip RS check (pass)
+        if len(df) >= idx + RS_LOOKBACK + 1:
+            rs_value = calculate_rs(df, benchmark_df, RS_LOOKBACK).iloc[idx]
+            if pd.isna(rs_value):
+                rs_passes = True  # Skip RS if can't calculate
+            else:
+                rs_passes = rs_value > RS_THRESHOLD
+        else:
+            rs_passes = True  # Skip RS if not enough data
+    
+    # Apply AND/OR logic
+    if RS_AS_OR:
+        # OR: Either EMA passes OR RS passes
+        if not (ema_passes or rs_passes):
             return None
     else:
-        # Alternative: close > EMA50 only (skip EMA200 check)
-        if not (close > short_ema):
+        # AND: Both must pass (or RS disabled)
+        if not ema_passes:
+            return None
+        if USE_RS_FILTER and not rs_passes:
             return None
     
     return {
         "close": round(float(close),  2),
         "ema50": round(float(short_ema), 2),
         "ema200":round(float(long_ema), 2),
+        "rs": round(float(rs_value), 2) if USE_RS_FILTER else 0.0,
     }
 
 

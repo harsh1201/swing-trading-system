@@ -34,6 +34,9 @@ from config.settings import (
     ALT_EMA_SHORT,
     ALT_EMA_LONG,
     REQUIRE_BOTH_EMAS,
+    USE_RS_FILTER,
+    RS_LOOKBACK,
+    RS_THRESHOLD,
     COIL_CANDLES,
     MAX_RANGE_PCT,
     NEAR_HIGH_PCT,
@@ -57,6 +60,7 @@ from strategies.long_breakout import (
     check_liquidity,
     calculate_market_breadth,
     calculate_atr,
+    calculate_rs,
 )
 
 
@@ -177,15 +181,18 @@ def is_market_bearish(nifty_df: pd.DataFrame, idx: int = -1) -> bool:
 
 # ── Stage 1: Trend (bearish) ────────────────────────────────────────────────
 
-def check_trend_short(df: pd.DataFrame, idx: int = -1) -> TrendResult | None:
+def check_trend_short(df: pd.DataFrame, idx: int = -1, benchmark_df: pd.DataFrame = None) -> TrendResult | None:
     """
     Evaluate the BEARISH trend at bar `idx` (default: latest bar).
 
     Condition: close < EMA50 < EMA200 (default)
     Or alternative: close < ALT_EMA_SHORT < ALT_EMA_LONG (when USE_ALTERNATIVE_EMA=True)
     Or just: close < EMA50 (when REQUIRE_BOTH_EMAS=False)
-
-    Returns a dict  {"close", "ema50", "ema200"}  or  None if condition fails.
+    
+    RS Filter (when USE_RS_FILTER=True):
+        - For shorts: RS < threshold (stock underperforming benchmark)
+    
+    Returns a dict  {"close", "ema50", "ema200", "rs"}  or  None if condition fails.
     Requires add_indicators() to have been called on df first.
     """
     row   = df.iloc[idx]
@@ -200,17 +207,38 @@ def check_trend_short(df: pd.DataFrame, idx: int = -1) -> TrendResult | None:
         long_ema = float(row["EMA200"])
     
     # Check trend condition (bearish: close < ema < long_ema)
+    ema_passes = False
     if REQUIRE_BOTH_EMAS:
-        if not (close < short_ema < long_ema):
-            return None
+        ema_passes = close < short_ema < long_ema
     else:
-        if not (close < short_ema):
-            return None
+        ema_passes = close < short_ema
+    
+    # Check RS condition for shorts (opposite: want negative RS = underperforming)
+    rs_passes = True
+    rs_value = 0.0
+    if USE_RS_FILTER:
+        # For backtest: if not enough data for RS, skip RS check (pass)
+        if len(df) >= idx + RS_LOOKBACK + 1:
+            rs_value = calculate_rs(df, benchmark_df, RS_LOOKBACK).iloc[idx]
+            if pd.isna(rs_value):
+                rs_passes = True  # Skip RS if can't calculate
+            else:
+                # For shorts: want negative RS (underperforming), so check < threshold
+                rs_passes = rs_value < RS_THRESHOLD
+        else:
+            rs_passes = True  # Skip RS if not enough data
+    
+    # Apply AND logic (both must pass)
+    if not ema_passes:
+        return None
+    if USE_RS_FILTER and not rs_passes:
+        return None
     
     return {
         "close": round(float(close),  2),
         "ema50": round(float(short_ema), 2),
         "ema200":round(float(long_ema), 2),
+        "rs": round(float(rs_value), 2) if USE_RS_FILTER else 0.0,
     }
 
 

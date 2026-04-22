@@ -4,8 +4,33 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-### Tested
-- **EMA trailing exit comparison**:
+### Added (2026-04-22)
+- **Relative Strength (RS) Filter**: Filters stocks based on relative performance vs benchmark
+  - RS = Stock Return - Nifty Return over lookback period
+  - For longs: Only trade stocks with positive RS (outperforming)
+  - For shorts: Only trade stocks with negative RS (underperforming)
+  - Added config parameters: USE_RS_FILTER, RS_LOOKBACK, RS_THRESHOLD, RS_AS_OR
+  - Implemented in both long_breakout.py and short_breakout.py
+
+### Tested (Not Adopted - EMA combinations with RS)
+- EMA50>EMA200 + RS: 598 trades, 30.6% WR, +653% P&L, 6.29% Max DD (BEST)
+
+### Tested (Adopted)
+- **RS Filter (ADOPTED v1.11)**: 
+  - Baseline (no RS): 658 trades, 28.9% WR, +552% P&L, 7.69% Max DD
+  - RS > 0 (AND): 598 trades, 30.6% WR, +653% P&L, 6.29% Max DD ← CURRENT BASELINE
+
+### Tested EMA + RS Combinations (Not Adopted)
+- **EMA50>EMA200 + RS** (baseline): 598 trades, 30.6% WR, +653% P&L, 6.29% Max DD ← BEST
+- **EMA50-only + RS**: 628 trades, 27.9% WR, +428% P&L, 7.67% Max DD
+- **EMA100>EMA200 + RS**: 620 trades, 28.7% WR, +475% P&L, 8.37% Max DD
+- **EMA50>EMA150 + RS**: 628 trades, 27.9% WR, +428% P&L, 7.67% Max DD
+
+**Conclusion: EMA50>EMA200 + RS remains the optimal configuration**
+
+---
+
+## [1.10] - 2026-04-22
   - EMA20 (baseline): 667 trades, 29.2% WR, +576% P&L, 7.69% Max DD
   - EMA15: 743 trades, 26.8% WR, +652% P&L, 14.48% Max DD
   - Conclusion: EMA15 has higher returns but 2x drawdown risk. Reverted to EMA20.
@@ -29,6 +54,13 @@ All notable changes to this project will be documented in this file.
   - EMA100 > EMA200: 691 trades, 29.4% WR, +643% P&L, 9.82% Max DD
   - EMA50 > EMA150: 658 trades, 28.7% WR, +545% P&L, 8.77% Max DD
   - Conclusion: EMA50>EMA200 remains optimal - lowest drawdown with similar risk-adjusted returns
+
+- **Relative Strength (RS) Filter** (2026-04-22):
+  - RS > 0 (AND mode): 596 trades, 30.7% WR, +648% P&L, 6.29% Max DD
+  - RS > 3%: 506 trades, 28.7% WR, +325% P&L, 6.00% Max DD
+  - RS > 5%: 459 trades, 25.9% WR, +192% P&L, 7.43% Max DD
+  - RS AS OR: 703 trades, 29.2% WR, +642% P&L, 10.77% Max DD
+  - Conclusion: RS > 0 (AND mode) best - higher WR (30.7% vs 28.9%), lower drawdown (6.29% vs 7.69%)
 
 ### Added
 - **ATR trailing config**: Added `USE_ATR_TRAILING`, `ATR_PERIOD`, `TRAILING_ATR_MULTIPLIER` in config/settings.py
