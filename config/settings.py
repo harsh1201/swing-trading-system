@@ -93,7 +93,6 @@ USE_ALTERNATIVE_EMA = False          # True = use alternative EMA config below (
 ALT_EMA_SHORT = 50                   # Alternative medium-term EMA
 ALT_EMA_LONG = 200                   # Alternative long-term EMA
 REQUIRE_BOTH_EMAS = True              # True = require both EMAs, False = EMA50 only
-REQUIRE_BOTH_EMAS = False             # True = require both EMAs, False = EMA50 only
 
 # ── ATR Trailing Exit ───────────────────────────────────────────────────────────
 USE_ATR_TRAILING = False     # True = ATR-based trailing, False = EMA-based trailing
