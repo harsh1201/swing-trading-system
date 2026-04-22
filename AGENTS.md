@@ -1,7 +1,7 @@
 # AGENTS.md - Swing Trading System Context
 
-> **Last Updated:** 2026-04-22  
-> **Version:** 1.11 (RS Filter Adopted)  
+> **Last Updated:** 2026-04-22
+> **Version:** 1.12 (Score Display Fixed + Portfolio Score)
 > **Maintainer:** Project Owner
 
 ---
@@ -271,6 +271,34 @@ Portfolio summary auto-posts to Discord when screener runs.
 
 ## Changelog
 
+### 2026-04-22 (v1.12 - Score Display Fixed + Portfolio Score)
+
+### Fixed
+- **Short score display hardcoded bug**: SHORT signal display showed hardcoded weights (40/35/25) instead of config values (30/30/40)
+  - Fixed in `screener.py:1247, 1249, 1260` - now uses config imports
+  - LONG strategy was fixed in v1.8, SHORT was missed
+- **Portfolio score field**: Added score tracking to portfolio
+  - Added `score` field to `PortfolioTrade` TypedDict
+  - `add_to_portfolio()` now accepts and saves score
+  - Score displayed in Discord trade row as `S:XX`
+  - Score displayed in screener tracker as new column
+
+### Added
+- **backtest.py --no-refresh flag**: Toggle to use cached data for faster re-runs
+  - Default: `refresh=True` (always download fresh data)
+  - Added `--no-refresh` CLI flag to use cached data only
+- **Portfolio Score column**: Shows in screener tracker output
+- **Discord Score display**: Shows in trade row format
+
+### Today's Scores (Apr 22, 2026)
+| Ticker | Direction | Score |
+|--------|----------|-------|
+| ABBOTINDIA.NS | SHORT | 74.2 |
+| RELIANCE.NS | SHORT | 60.3 |
+| BHARTIARTL.NS | SHORT | 57.1 |
+| PATANJALI.NS | SHORT | 49.6 |
+| JIOFIN.NS | LONG | 38.7 |
+
 ### 2026-04-22 (v1.9 - Output Improvements)
 
 ### Fixed
@@ -375,6 +403,8 @@ Portfolio summary auto-posts to Discord when screener runs.
 - [x] Test EMA trailing exit (EMA15 vs EMA20) - EMA20 better (lower DD)
 - [x] Test REWARD_RATIO (1.5, 2.0, 2.5) - RR 2.0 is optimal
 - [x] Test ATR trailing exit (1.5x, 2.0x, 2.5x, 3.0x) - does not outperform EMA20
+- [x] Test EMA Stage 1 filter (EMA50>EMA200 vs EMA50-only, EMA100>EMA200, EMA50>EMA150) - baseline optimal
+- [x] Test RS filter - RS>0 (AND) adopted in v1.11
 - [ ] Consider moving to Dhan API for live trading
 - [ ] Auto-close ACTIVE positions before earnings announcements
 - [ ] Detect and handle corporate actions (splits, bonuses)

@@ -122,6 +122,7 @@ class PortfolioTrade(TypedDict):
     outcome: str
     r_multiple: float  # Actual R achieved (negative for loss)
     current_price: float  # Latest price for tracking
+    score: float  # Setup score at entry time (0-100)
 
 class MarketRegimeInfo(TypedDict):
     close: float | None
@@ -212,7 +213,11 @@ def format_trade_row(t: dict) -> str:
     target_str = f"₹{target:,.0f}" if target and target > 0 else "--"
     curr_str = f"₹{curr_price:,.0f}" if curr_price and curr_price > 0 else "--"
     r_str = f"{r_val:+.2f}R" if r_val != 0 else "--"
-    
+
+    # Score from setup time
+    score_val = t.get("score", 0)
+    score_str = f"{score_val:.0f}" if score_val > 0 else "--"
+
     # Date info - show added for PENDING, triggered for ACTIVE, exit for CLOSED
     if t["status"] == "PENDING" and added_date:
         date_info = f"Added: {added_date}{days_info}"
@@ -226,8 +231,8 @@ def format_trade_row(t: dict) -> str:
     # Two-line format for better readability
     line1 = f"{status_emoji} **{ticker}** [{direction}]"
     line2 = f"   E:{entry_str} | SL:{sl_str} | Tgt:{target_str} | Curr:{curr_str}"
-    line3 = f"   {date_info} | R:{r_str}"
-    
+    line3 = f"   {date_info} | S:{score_str} | R:{r_str}"
+
     return f"{line1}\n{line2}\n{line3}"
 
 
@@ -799,12 +804,12 @@ def update_portfolio() -> None:
     
     trades.sort(key=sort_key)
     
-    col = f"{'Ticker':<12} {'Dir':<5} {'Status':<9} {'Added':<11} {'Trigger':<11} {'Exit':<11} {'Days':>4} {'Entry':>8} {'SL':>8} {'Target':>9} {'Current':>9} {'R'}"
+    col = f"{'Ticker':<12} {'Dir':<5} {'Status':<9} {'Added':<11} {'Trigger':<11} {'Exit':<11} {'Days':>4} {'Entry':>8} {'SL':>8} {'Target':>9} {'Current':>9} {'Score':>6} {'R'}"
     print(f"  {col}")
     print(f"  {'-' * len(col)}")
 
     for t in trades:
-        # Ensure all fields exist
+        # Ensure all fields exist (backward compatibility)
         if "r_multiple" not in t:
             t["r_multiple"] = 0.0
         if "entry_trigger_date" not in t:
@@ -815,6 +820,8 @@ def update_portfolio() -> None:
             t["exit_date"] = ""
         if "current_price" not in t:
             t["current_price"] = t.get("entry", 0)
+        if "score" not in t:
+            t["score"] = 0
         
         # Fetch latest data
         df = fetch_ohlcv(t["ticker"], days=30, refresh=True)
@@ -894,7 +901,8 @@ def update_portfolio() -> None:
                 t["r_multiple"] = round(_calculate_r_multiple(t["strategy"], t["entry"], exit_price, t["stop_loss"]), 2)
                 r_display = f"{t['r_multiple']:.2f}"
 
-        print(f"  {t['ticker']:<12} {direction:<5} {t['status']:<9} {added_date:<11} {trigger_date:<11} {exit_date:<11} {days_str:>4} {t['entry']:>8.2f} {t['stop_loss']:>8.2f} {t['target']:>9.2f} {curr_close:>9.2f} {r_display:>4} {status_change}")
+        score_display = f"{t['score']:.0f}" if t.get("score", 0) > 0 else "-"
+        print(f"  {t['ticker']:<12} {direction:<5} {t['status']:<9} {added_date:<11} {trigger_date:<11} {exit_date:<11} {days_str:>4} {t['entry']:>8.2f} {t['stop_loss']:>8.2f} {t['target']:>9.2f} {curr_close:>9.2f} {score_display:>6} {r_display:>4} {status_change}")
         
         if t["status"] != "CLOSED":
             updated_trades.append(t)
@@ -905,14 +913,14 @@ def update_portfolio() -> None:
     save_portfolio(updated_trades)
     print("=" * 90 + "\n")
 
-def add_to_portfolio(ticker: str, name: str, strategy: str, entry: float, sl: float, target: float) -> None:
+def add_to_portfolio(ticker: str, name: str, strategy: str, entry: float, sl: float, target: float, score: float = 0) -> None:
     """Add a new setup to the portfolio if it is not already tracked."""
     trades = load_portfolio()
-    
+
     # Avoid duplicates
     if any(t["ticker"] == ticker and t["strategy"] == strategy for t in trades):
         return
-        
+
     new_trade: PortfolioTrade = {
         "ticker": ticker,
         "name": name,
@@ -927,6 +935,7 @@ def add_to_portfolio(ticker: str, name: str, strategy: str, entry: float, sl: fl
         "outcome": "",
         "r_multiple": 0.0,
         "current_price": entry,
+        "score": score,
     }
     trades.append(new_trade)
     save_portfolio(trades)
@@ -1094,7 +1103,7 @@ def run_screener() -> None:
         signal_date = df.index[-1].strftime("%d-%m-%Y") if hasattr(df.index[-1], "strftime") else str(df.index[-1])
         
         # Track setup in portfolio
-        add_to_portfolio(ticker, name, "long_breakout", setup["entry"], setup["stop_loss"], setup["target"])
+        add_to_portfolio(ticker, name, "long_breakout", setup["entry"], setup["stop_loss"], setup["target"], score['total'])
 
         final_setups.append({
             "name":   name,
@@ -1235,9 +1244,9 @@ def print_trade_card_short(
 
     # Score breakdown
     print(f"  {'Overall Score':<22}  {_score_bar(score['total'])}")
-    print(f"  {'  Risk score':<22}  {score['risk_score']:>5.1f} / 40"
+    print(f"  {'  Risk score':<22}  {score['risk_score']:>5.1f} / {SCORE_WEIGHT_RISK}"
           f"   (lower risk % is better)")
-    print(f"  {'  Range score':<22}  {score['range_score']:>5.1f} / 35"
+    print(f"  {'  Range score':<22}  {score['range_score']:>5.1f} / {SCORE_WEIGHT_RANGE}"
           f"   (tighter coil is better)")
     g = score["ema50_gap_pct"]
     if g < 1.0:
@@ -1248,7 +1257,7 @@ def print_trade_card_short(
         zone = "mild extension (4–6%)"
     else:
         zone = "overextended (>6%)"
-    print(f"  {'  Trend score':<22}  {score['trend_score']:>5.1f} / 25"
+    print(f"  {'  Trend score':<22}  {score['trend_score']:>5.1f} / {SCORE_WEIGHT_TREND}"
           f"   {g:+.2f}% below EMA50  [{zone}]")
     print()
 
@@ -1544,7 +1553,7 @@ def run_screener_short() -> None:
         signal_date = df.index[-1].strftime("%d-%m-%Y") if hasattr(df.index[-1], "strftime") else str(df.index[-1])
 
         # Track setup in portfolio
-        add_to_portfolio(ticker, name, "short_breakout", setup["entry"], setup["stop_loss"], setup["target"])
+        add_to_portfolio(ticker, name, "short_breakout", setup["entry"], setup["stop_loss"], setup["target"], score['total'])
 
         final_setups.append({
             "name":   name,

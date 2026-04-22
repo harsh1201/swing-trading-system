@@ -177,12 +177,12 @@ def fetch_ticker(
     return fetch_ohlcv(ticker, days, refresh=refresh)
 
 
-def fetch_all(tickers: list[str]) -> dict[str, pd.DataFrame]:
+def fetch_all(tickers: list[str], refresh: bool = True) -> dict[str, pd.DataFrame]:
     """Fetch all tickers, print bar counts, skip failures."""
     data = {}
     for t in tickers:
         print(f"  Fetching {t:<20} ...", end=" ", flush=True)
-        df = fetch_ticker(t)
+        df = fetch_ticker(t, refresh=refresh)
         if df is None:
             print("FAILED — skipped")
         else:
@@ -835,21 +835,21 @@ def print_summary(trades: list[Trade], final_equity: float, max_drawdown: float 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 
-def run_backtest_strategy(export: bool = False) -> None:
+def run_backtest_strategy(export: bool = False, refresh: bool = True) -> None:
     """Run the full breakout backtest pipeline."""
     width = 62
     print("=" * width)
     print(f"{'SWING TRADING BACKTEST  —  FULL STRATEGY':^{width}}")
     print(f"{'Universe : ' + str(len(STOCKS)) + ' stocks':^{width}}")
     print(
-        f"{f'Coil {COIL_CANDLES}c  Range<{int(MAX_RANGE_PCT)}%  NearHi<{int(NEAR_HIGH_PCT)}%  RR 1:{int(REWARD_RATIO)}':^{width}}"
+        f"{f'Coil {COIL_CANDLES}c  Range<{int(MAX_RANGE_PCT)}%  NearHigh<{int(NEAR_HIGH_PCT)}%  RR 1:{int(REWARD_RATIO)}':^{width}}"
     )
     print(f"{'Run date : ' + datetime.today().strftime('%d-%m-%Y'):^{width}}")
     print("=" * width)
 
     print("\n  Fetching data ...\n")
     all_tickers = [NIFTY_TICKER] + list(STOCKS.keys())
-    raw = fetch_all(all_tickers)
+    raw = fetch_all(all_tickers, refresh=refresh)
 
     if NIFTY_TICKER not in raw:
         print("\n  ERROR: Could not fetch Nifty data. Aborting.")
@@ -1392,7 +1392,7 @@ def print_summary_short(trades: list[Trade], final_equity: float, max_drawdown: 
     print()
 
 
-def run_backtest_strategy_short(export: bool = False) -> None:
+def run_backtest_strategy_short(export: bool = False, refresh: bool = True) -> None:
     """Run the full short breakdown backtest pipeline."""
     width = 62
     print("=" * width)
@@ -1406,7 +1406,7 @@ def run_backtest_strategy_short(export: bool = False) -> None:
 
     print("\n  Fetching data ...\n")
     all_tickers = [NIFTY_TICKER] + list(STOCKS.keys())
-    raw = fetch_all(all_tickers)
+    raw = fetch_all(all_tickers, refresh=refresh)
 
     if NIFTY_TICKER not in raw:
         print("\n  ERROR: Could not fetch Nifty data. Aborting.")
@@ -1489,13 +1489,18 @@ def main() -> None:
         action="store_true",
         help="Export completed trades to CSV",
     )
+    parser.add_argument(
+        "--no-refresh",
+        action="store_true",
+        help="Skip refreshing data - use cached data only",
+    )
     args = parser.parse_args()
 
     # Strategy dispatch — add new strategies here as elif branches
     if args.strategy == "long_breakout":
-        run_backtest_strategy(export=args.export)
+        run_backtest_strategy(export=args.export, refresh=not args.no_refresh)
     elif args.strategy == "short_breakout":
-        run_backtest_strategy_short(export=args.export)
+        run_backtest_strategy_short(export=args.export, refresh=not args.no_refresh)
     else:
         print(f"Unknown strategy: {args.strategy}")
         raise SystemExit(1)

@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added (2026-04-22)
+- **Portfolio Score**: Track setup score at entry time
+  - Added `score` field to PortfolioTrade TypedDict
+  - `add_to_portfolio()` accepts score parameter
+  - Score displayed in Discord trade row as `S:XX`
+  - Score displayed in screener tracker as new column
+- **backtest.py --no-refresh flag**: Toggle to use cached data
+  - Default: refresh=True (always download fresh data)
+  - --no-refresh: Use cached data only for faster re-runs
+- **Short Score Display Fix**: Changed hardcoded weights (40/35/25) to config values (30/30/40)
+  - Fixed in screener.py:1247, 1249, 1260
+  - Previously LONG was fixed in v1.8, SHORT was missed
+
+### Changed (2026-04-22)
 - **Relative Strength (RS) Filter**: Filters stocks based on relative performance vs benchmark
   - RS = Stock Return - Nifty Return over lookback period
   - For longs: Only trade stocks with positive RS (outperforming)
