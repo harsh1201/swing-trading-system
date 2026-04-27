@@ -109,7 +109,7 @@ All notable changes to this project will be documented in this file.
 - **Discord direction bug**: Short trades were showing as LONG in Discord messages
 - **Score weights hardcoded bug**: Score calculations used hardcoded weights (40/35/25) instead of config values (30/30/40)
 - **Discord trade row format**: Improved readability - now 3 lines instead of 1 congested line
-  - Shows "Trig:" for ACTIVE, "Added:" for PENDING, "Exit:" for CLOSED
+  - Shows "Trigger:" for ACTIVE, "Added:" for PENDING, "Exit:" for CLOSED
   - Uses "--" instead of "-" for empty values
 - **Market regime display**: Changed "❓ unknown" to "⚪ REGIME OFF" when regime is disabled
 

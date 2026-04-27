@@ -1,0 +1,31 @@
+# fly.toml configuration for Fly.io deployment
+# 
+# Usage:
+# 1. Install flyctl: https://fly.io/docs/hands-on/install-flyctl/
+# 2. Run 'fly launch' to initialize (don't overwrite this file if asked)
+# 3. Set secrets for Discord webhooks:
+#    fly secrets set DISCORD_WEBHOOK_URL="..." DISCORD_LONG_WEBHOOK_URL="..." DISCORD_SHORT_WEBHOOK_URL="..."
+# 4. Deploy: fly deploy
+
+app = "swing-trading-system"
+primary_region = "bom" # Mumbai region for low latency to NSE data
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  LIVE_MODE = "True"
+
+# To run the screener daily, you can use Fly Machines with a schedule.
+# This config defines the app, but you'll trigger the runs via:
+# 
+# Long Screener (Runs at 11:30 PM IST / 18:00 UTC daily):
+# fly machine run . --command "python screener.py --strategy long_breakout" --schedule "0 18 * * *" --region bom
+# 
+# Short Screener (Runs at 11:30 PM IST / 18:00 UTC daily):
+# fly machine run . --command "python screener.py --strategy short_breakout" --schedule "0 18 * * *" --region bom
+
+# Standard process (if you want to run a web server or a long-running process)
+[processes]
+  # Optional: You can add a long-running scheduler here if you prefer
+  # app = "python scheduler.py"

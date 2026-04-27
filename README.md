@@ -91,6 +91,45 @@ python backtest.py --strategy long_breakout --export
 
 ---
 
+## 🚀 Deployment (Fly.io)
+
+This repository is ready for deployment to [Fly.io](https://fly.io/) as a scheduled task.
+
+### 1. **Prerequisites**
+- [Install flyctl](https://fly.io/docs/hands-on/install-flyctl/)
+- Log in: `fly auth login`
+
+### 2. **Initial Setup**
+Initialize the app (choose a unique name) but prevent it from deploying a default 24/7 machine:
+```bash
+fly launch --no-deploy
+```
+*Note: If prompted to overwrite `fly.toml`, choose **No**.*
+
+### 3. **Set Secrets**
+Configure your Discord webhooks as secure environment variables:
+```bash
+fly secrets set \
+  DISCORD_WEBHOOK_URL="your_url" \
+  DISCORD_LONG_WEBHOOK_URL="your_long_url" \
+  DISCORD_SHORT_WEBHOOK_URL="your_short_url"
+```
+
+### 4. **Run Scheduled Screener**
+Deploy the screener to run daily using Fly Machines at exactly 11:30 PM IST (`18:00 UTC`):
+
+**Long Strategy:**
+```bash
+fly machine run . --command "python screener.py --strategy long_breakout" --schedule "0 18 * * *" --region bom
+```
+
+**Short Strategy:**
+```bash
+fly machine run . --command "python screener.py --strategy short_breakout" --schedule "0 18 * * *" --region bom
+```
+
+---
+
 ## 📚 Detailed Documentation
 
 -   [🏛 System Architecture](docs/architecture.md)

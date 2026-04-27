@@ -340,7 +340,7 @@ Portfolio summary auto-posts to Discord when screener runs.
 ### Fixed
 - **Discord trade row format**: Improved readability
   - Changed from one congested line to 3-line format
-  - Shows "Trig:" for ACTIVE, "Added:" for PENDING, "Exit:" for CLOSED
+  - Shows "Trigger:" for ACTIVE, "Added:" for PENDING, "Exit:" for CLOSED
   - Uses "--" instead of "-" for empty values
 - **Market regime display**: Changed "❓ unknown" to "⚪ REGIME OFF" when regime is disabled
   - Both long and short strategy outputs now show clear "REGIME OFF" message
