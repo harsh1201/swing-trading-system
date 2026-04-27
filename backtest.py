@@ -75,6 +75,7 @@ from config.settings import (
     USE_ATR_TRAILING,
     VOLUME_AVG_PERIOD,
     WALK_FORWARD_SPLIT_YEAR,
+    DISCORD_PORTFOLIO_WEBHOOK,
 )
 from config.stocks import SECTORS, STOCKS
 from data.cache import fetch_ohlcv
@@ -840,6 +841,56 @@ def print_summary(trades: list[Trade], final_equity: float, max_drawdown: float 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
+def send_backtest_to_discord(strategy: str, trades: list[Trade], final_equity: float, max_drawdown: float) -> None:
+    """Send backtest summary to Discord if webhook is configured."""
+    if not DISCORD_PORTFOLIO_WEBHOOK:
+        return
+        
+    total = len(trades)
+    if total == 0:
+        return
+        
+    wins = sum(1 for t in trades if t["outcome"] == "win")
+    losses = sum(1 for t in trades if t["outcome"] == "loss")
+    win_rate = round(float(wins / total * 100), 1) if total else 0.0
+    
+    net_pct = round(float((final_equity - STARTING_EQUITY) / STARTING_EQUITY * 100), 2)
+    net_abs = round(float(final_equity - STARTING_EQUITY), 2)
+    
+    avg_win = round(float(sum(t["pnl_pct"] for t in trades if t["outcome"] == "win") / wins), 2) if wins else 0.0
+    avg_loss = round(float(sum(t["pnl_pct"] for t in trades if t["outcome"] == "loss") / losses), 2) if losses else 0.0
+    avg_rr = round(float(avg_win / avg_loss), 2) if avg_loss != 0 else 0.0
+    
+    date_str = datetime.now().strftime("%d %b %Y, %H:%M")
+    direction = "LONG" if strategy == "long_breakout" else "SHORT"
+    emoji = "🟢" if direction == "LONG" else "🔴"
+    
+    lines = []
+    lines.append(f"{emoji} **BACKTEST SUMMARY ({direction})**")
+    lines.append(f"*{date_str}*")
+    lines.append("")
+    lines.append(f"**Metrics**")
+    lines.append(f"• Total Trades: **{total}** (W:{wins} | L:{losses})")
+    lines.append(f"• Win Rate: **{win_rate}%**")
+    lines.append(f"• Net P&L: **{'+' if net_pct >= 0 else ''}{net_pct}%** (₹{net_abs:,.0f})")
+    lines.append(f"• Max Drawdown: **{max_drawdown*100:.2f}%**")
+    lines.append(f"• Realized R:R: **1:{avg_rr}**")
+    lines.append("")
+    lines.append(f"*Note: Detailed trade logs exported to CSV.*")
+    
+    message = "\n".join(lines)
+    
+    try:
+        import requests
+        resp = requests.post(DISCORD_PORTFOLIO_WEBHOOK, json={"content": message}, timeout=10)
+        if resp.status_code == 204:
+            print("  [+] Backtest summary posted to Discord")
+        else:
+            print(f"  [!] Failed to post to Discord (HTTP {resp.status_code})")
+    except Exception as e:
+        print(f"  [!] Discord error: {e}")
+
+
 
 def run_backtest_strategy(export: bool = False, refresh: bool = True) -> None:
     """Run the full breakout backtest pipeline."""
@@ -914,6 +965,7 @@ def run_backtest_strategy(export: bool = False, refresh: bool = True) -> None:
             avg_hold=avg_hold,
             notes=f"Config: COIL={COIL_CANDLES}, RANGE={MAX_RANGE_PCT}%, RR={REWARD_RATIO}",
         )
+        send_backtest_to_discord("long_breakout", trades, final_equity, max_drawdown)
         print(f"\n  [+] Saved to backtest history\n")
 
     if export:
@@ -1477,6 +1529,7 @@ def run_backtest_strategy_short(export: bool = False, refresh: bool = True) -> N
             avg_hold=avg_hold,
             notes=f"Config: COIL={COIL_CANDLES}, RANGE={MAX_RANGE_PCT}%, RR={REWARD_RATIO}",
         )
+        send_backtest_to_discord("short_breakout", trades, final_equity, max_drawdown)
         print(f"\n  [+] Saved to backtest history\n")
 
     if export:

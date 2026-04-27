@@ -7,6 +7,7 @@
 Trend-following swing trading system based on:
 - Breakout + consolidation structure
 - EMA trend filtering (regime filter DISABLED - manual verification required)
+- Relative Strength (RS) Filter (ADOPTED v1.11 - stock must outperform Nifty)
 - Risk-defined execution
 - Low win-rate (~25%), high RR (1:2) model
 
@@ -19,8 +20,11 @@ Trend-following swing trading system based on:
 - Trend condition:
   - Close > EMA50 > EMA200
 - Consolidation:
-  - Last 10 candles range < 8% (relaxed to 10%)
-  - Price near highs (<8% from breakout level)
+  - Last 10 candles range < 8%
+  - Price near highs (<5% from breakout level)
+- RS Filter:
+  - Longs: RS > 0 (Stock return > Nifty return over 20 days)
+  - Shorts: RS < 0 (Stock return < Nifty return over 20 days)
 
 ---
 
@@ -135,16 +139,16 @@ The regime filter has been removed from all strategies. Manual verification of m
   - Minimum ₹5 Cr daily turnover (relaxed from ₹10 Cr)
 
 - Price:
-  - Minimum ₹50 (avoid penny stocks)
+  - Minimum ₹15 (avoid penny stocks)
 
 - Volume:
-  - ≥ 1.0x average volume (relaxed - no volume surge required)
+  - ≥ 1.0x average volume (latest volume must be at least equal to 20d avg)
 
 - Gap filter:
-  - Skip if gap-up > 2%
+  - Skip if gap-up > 2% (Long) or gap-down > 2% (Short)
 
 - Risk filter:
-  - Trade risk < 15% (relaxed from 10%)
+  - Trade risk < 12% of entry price
 
 ---
 

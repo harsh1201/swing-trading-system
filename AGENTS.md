@@ -1,8 +1,9 @@
 # AGENTS.md - Swing Trading System Context
 
-> **Last Updated:** 2026-04-22
-> **Version:** 1.14 (Candle Strength DISABLED)
+> **Last Updated:** 2026-04-27
+> **Version:** 1.15 (Discord Integration Fixed)
 > **Maintainer:** Project Owner
+
 
 ---
 
@@ -28,7 +29,7 @@ A rule-based, statistically validated swing trading framework for the Indian sto
 | `COIL_CANDLES` | **10** | 12 | Tested: 10 candles = +568% vs 12 candles = +365% |
 | `MAX_RANGE_PCT` | 8% | 10% | Tighter consolidation |
 | `NEAR_HIGH_PCT` | 5% | 8% | Near breakout level |
-| `MAX_RISK_PCT` | 15% | 10% | Allow wider stop losses |
+| `MAX_RISK_PCT` | 12% | 10% | Allow wider stop losses |
 
 ### Core Strategy Parameters
 | Parameter | Value | Description |
@@ -270,6 +271,18 @@ Portfolio summary auto-posts to Discord when screener runs.
 ---
 
 ## Changelog
+
+### 2026-04-27 (v1.15 - Discord Integration Fixed)
+
+### Added
+- **Unified Discord Portfolio Updates**: `screener.py` now posts portfolio summaries to Discord for both Long and Short strategies after execution.
+- **Improved Signal Formatting**: Discord signals now use a 3-line format for better readability and mobile visibility.
+- **Portfolio Tracker Fixes**: `update_portfolio()` now accepts a strategy argument to prevent cross-strategy data contamination.
+
+### Added (2026-04-23)
+- **Discord Integration (TASK-001)**:
+  - Webhook routing based on `--strategy` argument (`DISCORD_LONG_WEBHOOK_URL`, `DISCORD_SHORT_WEBHOOK_URL`).
+  - `send_backtest_to_discord` utility for summarized performance stats.
 
 ### 2026-04-22 (v1.14 - Candle Strength DISABLED)
 

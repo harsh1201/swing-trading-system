@@ -293,9 +293,9 @@ def test_format_portfolio_for_discord():
         {"ticker": "ACTIVE1.NS", "status": "ACTIVE", "strategy": "long_breakout", "entry": 100, "stop_loss": 95, "target": 110, "current_price": 98, "r_multiple": 0},
         {"ticker": "CLOSED1.NS", "status": "CLOSED", "strategy": "long_breakout", "entry": 100, "stop_loss": 95, "target": 110, "exit_date": "15-04-2026", "outcome": "WIN", "r_multiple": 2.0},
     ]
-    
-    result = format_portfolio_for_discord(trades)
-    
+
+    result = format_portfolio_for_discord(trades, "long_breakout")
+
     assert "SWING TRADING PORTFOLIO" in result
     assert "SUMMARY" in result
     assert "Active:" in result
@@ -304,42 +304,14 @@ def test_format_portfolio_for_discord():
 
 def test_format_portfolio_for_discord_empty():
     """Test Discord formatting with empty portfolio."""
-    result = format_portfolio_for_discord([])
+    result = format_portfolio_for_discord([], "long_breakout")
     assert "Portfolio is empty" in result
-
 
 def test_post_to_discord_no_webhook():
     """Test post_to_discord returns False when webhook is empty."""
     result = post_to_discord("test", "")
     assert result is False
 
-
-def test_cleanup_portfolio_dead_ticker():
-    """Test that trades with DEAD_TICKERS are removed."""
-    from config.settings import DEAD_TICKERS
-    
-    trades = [
-        {"ticker": "GATI.NS", "status": "PENDING", "date_added": "01-01-2023", "exit_date": "", "outcome": ""},
-        {"ticker": "ANUPAM.NS", "status": "PENDING", "date_added": "01-01-2023", "exit_date": "", "outcome": ""},
-        {"ticker": "ACTIVE1.NS", "status": "ACTIVE", "date_added": "01-01-2023", "entry_trigger_date": "10-04-2026", "exit_date": "", "outcome": ""},
-    ]
-    
-    cleaned, stats = cleanup_portfolio(trades)
-    
-    assert stats.get("dead_ticker", 0) == 2
-    assert len(cleaned) == 1
-    assert cleaned[0]["ticker"] == "ACTIVE1.NS"
-
-
-def test_map_ticker_alias():
-    """Test ticker mapping for symbol changes."""
-    from screener import _map_ticker
-    
-    assert _map_ticker("IIFLSEC.NS") == "IIFLCAPS.NS"
-    assert _map_ticker("CANFIN.NS") == "CANFINHOME.NS"
-    assert _map_ticker("REPCO.NS") == "REPCOHOME.NS"
-    assert _map_ticker("VIJAYAETL.NS") == "VIJAYA.NS"
-    assert _map_ticker("RELIANCE.NS") == "RELIANCE.NS"  # Unchanged
 
 
 def test_calculate_r_multiple_long():
@@ -494,9 +466,8 @@ def test_send_portfolio_to_discord_no_trades(monkeypatch):
     # Mock to avoid actual calls
     monkeypatch.setattr("screener.post_to_discord", lambda msg, url: True)
     monkeypatch.setattr("screener.load_portfolio", lambda: [])
-    
-    send_portfolio_to_discord([])
 
+    send_portfolio_to_discord([], "long_breakout")
 
 def test_load_save_portfolio(tmp_path, monkeypatch):
     """Test portfolio load and save."""

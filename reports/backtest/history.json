@@ -698,5 +698,47 @@
       "avg_hold": 10.3
     },
     "notes": "Config: COIL=10, RANGE=8.0%, RR=2.0"
+  },
+  {
+    "timestamp": "2026-04-23T08:59:55.358504",
+    "strategy": "long_breakout",
+    "metrics": {
+      "total_trades": 599,
+      "win_rate": 30.4,
+      "net_pct": 658.15,
+      "final_equity": 758147.8282909093,
+      "avg_rr": 1.88,
+      "max_drawdown": 0.0602455884565594,
+      "avg_hold": 10.2
+    },
+    "notes": "Config: COIL=10, RANGE=8.0%, RR=2.0"
+  },
+  {
+    "timestamp": "2026-04-23T09:01:39.957308",
+    "strategy": "short_breakout",
+    "metrics": {
+      "total_trades": 431,
+      "win_rate": 23.0,
+      "net_pct": 39.54,
+      "final_equity": 139538.71111309924,
+      "avg_rr": 1.74,
+      "max_drawdown": 0.22586917697813635,
+      "avg_hold": 10.2
+    },
+    "notes": "Config: COIL=10, RANGE=8.0%, RR=2.0"
+  },
+  {
+    "timestamp": "2026-04-27T13:42:06.743437",
+    "strategy": "long_breakout",
+    "metrics": {
+      "total_trades": 600,
+      "win_rate": 30.0,
+      "net_pct": 632.13,
+      "final_equity": 732132.938196307,
+      "avg_rr": 1.88,
+      "max_drawdown": 0.06024624066059453,
+      "avg_hold": 10.2
+    },
+    "notes": "Config: COIL=10, RANGE=8.0%, RR=2.0"
   }
 ]

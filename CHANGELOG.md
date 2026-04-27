@@ -2,7 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [1.15] - 2026-04-27
+
+### Added
+- **Unified Discord Portfolio Updates**: `screener.py` now posts portfolio summaries to Discord for both Long and Short strategies after execution.
+- **Improved Signal Formatting**: Discord signals now use a 3-line format for better readability and mobile visibility.
+- **Portfolio Tracker Fixes**: `update_portfolio()` now accepts a strategy argument to prevent cross-strategy data contamination.
+
+### Added (2026-04-23)
+- **Discord Integration (TASK-001)**:
+  - Webhook routing based on `--strategy` argument (`DISCORD_LONG_WEBHOOK_URL`, `DISCORD_SHORT_WEBHOOK_URL`).
+  - `send_backtest_to_discord` utility for summarized performance stats.
 
 ### Added (2026-04-22)
 - **Candle Strength Filter**: TESTED AND DISABLED (hurt performance)

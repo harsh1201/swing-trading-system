@@ -41,6 +41,10 @@ The screener also displays the **Current Portfolio** with all Active, Pending, a
 -   Current R-multiple
 -   Portfolio summary (Win Rate, Avg R, Total R)
 
+### **Discord Alerts**
+The system automatically posts portfolio updates and trade signals to Discord if webhooks are configured in your `.env` file. Long and short strategies use separate webhooks for better organization.
+
+
 ---
 
 ## 🧪 Backtesting Engine (`backtest.py`)
@@ -57,6 +61,9 @@ python backtest.py --strategy short_breakout
 
 # Export completed trades (including entry_date and exit_date) to CSV
 python backtest.py --strategy long_breakout --export
+
+# Use cached data only (skip fresh download for speed)
+python backtest.py --strategy long_breakout --no-refresh
 ```
 
 ### **Output Reports**

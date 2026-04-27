@@ -1,7 +1,7 @@
 # 📈 NSE India Swing Trading System
 
 > A rule-based, statistically validated swing trading framework for the Indian stock market (NSE).
-> **Version:** 1.11 (2026-04-22)
+> **Version:** 1.15 (2026-04-27)
 
 ---
 
@@ -42,13 +42,31 @@ The system is modular and designed for easy extension:
 ---
 
 ## 🛠 Quick Start
+### 0. **Activate virtual environment**
+```bash
+source .venv/bin/activate
+```
 
 ### 1. **Install**
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2. **Run Screener**
+### 2. **Configure Discord (Optional)**
+Create a `.env` file in the root directory to receive trade alerts.  
+*See `.env.example` for the template:*
+
+```bash
+# General Portfolio execution results
+DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/..."
+
+# Strategy-specific signal alerts
+DISCORD_LONG_WEBHOOK_URL="https://discord.com/api/webhooks/..."
+DISCORD_SHORT_WEBHOOK_URL="https://discord.com/api/webhooks/..."
+```
+
+### 3. **Run Screener**
+
 Check today's trade setups for both directions:
 ```bash
 # Long breakout strategy

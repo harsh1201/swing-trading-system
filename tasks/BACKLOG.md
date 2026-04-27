@@ -17,11 +17,20 @@
 
 ---
 
+## Completed (v1.15)
+- [x] Adopted RS Filter (Relative Strength)
+- [x] Disabled regime filter permanently (requires manual review)
+- [x] Disabled candle strength filter (hurt overall performance)
+- [x] Separate Discord webhooks for Long/Short signals
+- [x] Corrected score display logic for shorts
+- [x] Added tracking for peak equity and max drawdown
+
+---
+
 ## Completed (v1.4)
 - [x] Portfolio features (cleanup, r_multiple, tracking)
 - [x] Discord integration (webhook posting)
 - [x] Backtest versioning (history.json)
-- [x] Regime filter removed from all strategies
 - [x] Ticker alias mapping (_map_ticker function)
 - [x] Dead ticker handling
 
