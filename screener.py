@@ -238,7 +238,7 @@ def format_trade_row(t: dict) -> str:
     if t["status"] == "PENDING" and added_date:
         date_info = f"Added: {added_date}{days_info}"
     elif t["status"] == "ACTIVE" and trigger_date:
-        date_info = f"Trig: {trigger_date}{days_info}"
+        date_info = f"Trigger: {trigger_date}{days_info}"
     elif t["status"] == "CLOSED" and exit_date:
         date_info = f"Exit: {exit_date}"
     else:
