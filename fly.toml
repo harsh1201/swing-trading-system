@@ -16,16 +16,11 @@ primary_region = "bom" # Mumbai region for low latency to NSE data
 [env]
   LIVE_MODE = "True"
 
-# To run the screener daily, you can use Fly Machines with a schedule.
-# This config defines the app, but you'll trigger the runs via:
-# 
-# Long Screener (Runs at 11:30 PM IST / 18:00 UTC daily):
-# fly machine run . --command "python screener.py --strategy long_breakout" --schedule "0 18 * * *" --region bom
-# 
-# Short Screener (Runs at 11:30 PM IST / 18:00 UTC daily):
-# fly machine run . --command "python screener.py --strategy short_breakout" --schedule "0 18 * * *" --region bom
+# Persistent storage for tracked trades (portfolio.json)
+[mounts]
+  source = "swing_data"
+  destination = "/app/data"
 
-# Standard process (if you want to run a web server or a long-running process)
+# Standard process running our background scheduler
 [processes]
-  # Optional: You can add a long-running scheduler here if you prefer
-  # app = "python scheduler.py"
+  app = "python -u scheduler.py"

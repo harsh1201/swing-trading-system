@@ -14,5 +14,5 @@ COPY . .
 # DISCORD_LONG_WEBHOOK_URL
 # DISCORD_SHORT_WEBHOOK_URL
 
-# Default command (Safety catch: do nothing. Scheduled machines override this)
-CMD ["echo", "Swing Trading System deployed. Triggered via Fly scheduled machines."]
+# Default command: run the continuous background scheduler
+CMD ["python", "-u", "scheduler.py"]
