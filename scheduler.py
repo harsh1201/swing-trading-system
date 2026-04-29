@@ -20,22 +20,15 @@ def run_screener():
         logging.error(f"Error during screener runs: {e}")
 
 if __name__ == "__main__":
-    last_run_date = None
-    logging.info("Swing Trading System Scheduler started.")
-    logging.info("Waiting for 18:00 UTC (11:30 PM IST) daily to run screener...")
-
+    logging.info("Swing Trading System starting up...")
+    
+    # Run immediately on startup (triggered by Fly.io restart)
+    logging.info("Triggering screener run on startup...")
+    run_screener()
+    
+    logging.info("Execution complete. System entering standby mode.")
+    logging.info("To re-trigger, simply restart the deployment in Fly.io.")
+    
+    # Keep the process alive so Fly.io doesn't restart it immediately
     while True:
-        try:
-            now = datetime.now(timezone.utc)
-            current_date = now.date()
-            
-            # Run at 18:00 UTC once per day
-            if now.hour >= 18 and current_date != last_run_date:
-                run_screener()
-                last_run_date = current_date
-            
-            # Sleep for 60 seconds
-            time.sleep(60)
-        except Exception as e:
-            logging.error(f"Error in scheduler loop: {e}")
-            time.sleep(60)
+        time.sleep(3600)

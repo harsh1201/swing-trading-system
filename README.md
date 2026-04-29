@@ -115,18 +115,23 @@ fly secrets set \
   DISCORD_SHORT_WEBHOOK_URL="your_short_url"
 ```
 
-### 4. **Run Scheduled Screener**
-Deploy the screener to run daily using Fly Machines at exactly 11:30 PM IST (`18:00 UTC`):
+### 4. **Run Screener (Manual Trigger)**
+The system is configured to run immediately whenever the Fly.io deployment is restarted.
 
-**Long Strategy:**
-```bash
-fly machine run . --command "python screener.py --strategy long_breakout" --schedule "0 18 * * *" --region bom
-```
+1. **Deploy the app:**
+   ```bash
+   fly deploy
+   ```
 
-**Short Strategy:**
-```bash
-fly machine run . --command "python screener.py --strategy short_breakout" --schedule "0 18 * * *" --region bom
-```
+2. **Re-trigger the screener:**
+   Whenever you want to run the scan (e.g., after market close), simply restart the app via the Fly.io dashboard or CLI:
+   ```bash
+   fly apps restart swing-trading-system
+   ```
+   The `scheduler.py` will run both LONG and SHORT strategies once and then enter standby mode.
+
+### 5. **Persistence**
+The system uses a Fly Volume named `swing_data` mounted at `/app/data`. This ensures your `portfolio.json` file is **preserved** even when the app is restarted or redeployed.
 
 ---
 
