@@ -1,4 +1,3 @@
-import time
 import subprocess
 import logging
 from datetime import datetime, timezone
@@ -22,13 +21,11 @@ def run_screener():
 if __name__ == "__main__":
     logging.info("Swing Trading System starting up...")
     
-    # Run immediately on startup (triggered by Fly.io restart)
+    # Run immediately on startup (triggered by Fly.io scheduled restart)
     logging.info("Triggering screener run on startup...")
     run_screener()
     
-    logging.info("Execution complete. System entering standby mode.")
-    logging.info("To re-trigger, simply restart the deployment in Fly.io.")
-    
-    # Keep the process alive so Fly.io doesn't restart it immediately
-    while True:
-        time.sleep(3600)
+    logging.info("Execution complete. Exiting so Fly.io can schedule the next run.")
+    # NOTE: Do NOT add a sleep loop here.
+    # Fly.io scheduling works by starting a STOPPED machine at the configured time.
+    # If the process never exits, the machine stays "running" and the schedule never fires.
