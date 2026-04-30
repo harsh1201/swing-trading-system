@@ -666,9 +666,10 @@ def print_execution_summary(
 
 def _get_portfolio_cache() -> DataCache:
     """Return the DataCache instance for the portfolio."""
-    # Place it in the same data folder as CSVs
-    data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
-    return DataCache(os.path.join(data_dir, "portfolio.json"))
+    # Place it in the storage folder to avoid hiding python files
+    storage_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "storage")
+    os.makedirs(storage_dir, exist_ok=True)
+    return DataCache(os.path.join(storage_dir, "portfolio.json"))
 
 def load_portfolio() -> List[PortfolioTrade]:
     """Load tracked trades from disk."""

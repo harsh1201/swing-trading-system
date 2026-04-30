@@ -26,8 +26,10 @@ from datetime import datetime, timedelta
 import pandas as pd
 import yfinance as yf
 
-# Absolute path to this folder so imports work from any cwd
-_DIR = os.path.dirname(os.path.abspath(__file__))
+# Absolute path to a dedicated storage folder to prevent hiding python files when mounted
+_BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_DIR = os.path.join(_BASE_DIR, "storage")
+os.makedirs(_DIR, exist_ok=True)
 
 
 def _cache_path(ticker: str) -> str:

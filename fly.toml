@@ -19,7 +19,7 @@ primary_region = "bom" # Mumbai region for low latency to NSE data
 # Persistent storage for tracked trades (portfolio.json)
 [mounts]
   source = "swing_data"
-  destination = "/app/data"
+  destination = "/app/storage"
 
 # Standard process running our background scheduler
 [processes]
