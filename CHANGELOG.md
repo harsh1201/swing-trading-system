@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.16] - 2026-05-07
+
+### Fixed
+- **Discord Formatting Fix**: Implemented code-block aware chunking in `post_to_discord`. Large messages are now split such that ` ```yaml ` blocks are properly closed before a split and re-opened in the next chunk.
+- **Improved Chunking Stability**: Added unit test `test_post_to_discord_chunking` to verify formatting preservation across message boundaries.
+
 ## [1.15] - 2026-04-27
 
 ### Added

@@ -161,13 +161,43 @@ def post_to_discord(message: str, webhook_url: str) -> bool:
         lines = message.split('\n')
         chunks = []
         current_chunk = ""
+        in_code_block = False
+        code_block_lang = "yaml"  # Default language for this project
         
         for line in lines:
-            if len(current_chunk) + len(line) + 1 > 1900:
+            # Check if this line toggles code block state
+            line_has_toggle = "```" in line
+            
+            # Check if adding this line (plus potential closure) would exceed the limit
+            # We add a buffer for closure (```) and re-opening (```yaml\n)
+            limit = 1900
+            potential_len = len(current_chunk) + len(line) + 2
+            if in_code_block:
+                potential_len += 10  # Buffer for closure/re-opening
+            
+            if potential_len > limit and current_chunk:
+                # If we are in a code block, close it before finishing this chunk
+                if in_code_block:
+                    current_chunk += "\n```"
+                
                 chunks.append(current_chunk)
-                current_chunk = line
+                
+                # If we were in a code block, re-open it in the next chunk
+                if in_code_block:
+                    current_chunk = f"```{code_block_lang}\n" + line
+                else:
+                    current_chunk = line
             else:
                 current_chunk += ("\n" + line) if current_chunk else line
+            
+            # Update code block state AFTER checking for split
+            if line_has_toggle:
+                in_code_block = not in_code_block
+                # If we just opened a block, try to capture the language
+                if in_code_block and "```" in line and len(line.strip()) > 3:
+                    potential_lang = line.strip().replace("```", "")
+                    if potential_lang:
+                        code_block_lang = potential_lang
         
         if current_chunk:
             chunks.append(current_chunk)

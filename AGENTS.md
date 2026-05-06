@@ -1,7 +1,7 @@
 # AGENTS.md - Swing Trading System Context
 
-> **Last Updated:** 2026-04-27
-> **Version:** 1.15 (Discord Integration Fixed)
+> **Last Updated:** 2026-05-07
+> **Version:** 1.16 (Discord Formatting Fixed)
 > **Maintainer:** Project Owner
 
 
@@ -271,6 +271,12 @@ Portfolio summary auto-posts to Discord when screener runs.
 ---
 
 ## Changelog
+
+### 2026-05-07 (v1.16 - Discord Formatting Fixed)
+
+### Fixed
+- **Discord Formatting Fix**: Implemented code-block aware chunking in `post_to_discord`. Large messages are now split such that ` ```yaml ` blocks are properly closed before a split and re-opened in the next chunk.
+- **Improved Chunking Stability**: Added unit test `test_post_to_discord_chunking` to verify formatting preservation across message boundaries.
 
 ### 2026-04-27 (v1.15 - Discord Integration Fixed)
 
