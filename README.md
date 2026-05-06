@@ -128,10 +128,10 @@ The system is configured to run immediately whenever the Fly.io deployment is re
    ```bash
    fly apps restart swing-trading-system
    ```
-   The `scheduler.py` will run both LONG and SHORT strategies once and then enter standby mode.
+   The `entrypoint.sh` will run both LONG and SHORT strategies once and then enter standby mode.
 
 ### 5. **Persistence**
-The system uses a Fly Volume named `swing_data` mounted at `/app/data`. This ensures your `portfolio.json` file is **preserved** even when the app is restarted or redeployed.
+The system uses a Fly Volume named `swing_data` mounted at `/app/storage`. This ensures your `portfolio.json` file is **preserved** even when the app is restarted or redeployed.
 
 ---
 
