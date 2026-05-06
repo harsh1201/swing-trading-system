@@ -113,7 +113,13 @@ class DataCache:
         
         cache_data[key] = data
         with open(self.filepath, 'w') as f:
-            json.dump(cache_data, f)
+            # allow_nan=False will raise an error if NaN is found, 
+            # but it's better to clean the data first or use a custom encoder.
+            # For simplicity, we'll use a hack to ensure valid JSON.
+            json_str = json.dumps(cache_data, allow_nan=True)
+            # Replace literal NaN with null
+            json_str = json_str.replace(": NaN", ": null")
+            f.write(json_str)
 
     def load(self, key: str) -> dict | None:
         try:

@@ -1,13 +1,9 @@
-# Individual data files
-data/*.csv
-data/portfolio.json
-data/cache/
-reports/cache/
-
-# Debug outputs
-*.txt
+# Persistent storage and cache
+data/
+storage/
 *.csv
-.coverage
+*.json
+!config/stocks.json  # Keep stock list if it was json, but it's .py here
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

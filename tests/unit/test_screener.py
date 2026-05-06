@@ -313,6 +313,45 @@ def test_post_to_discord_no_webhook():
     assert result is False
 
 
+def test_post_to_discord_chunking(monkeypatch):
+    """Test post_to_discord correctly chunks large messages while preserving code blocks."""
+    import requests
+    
+    posted_chunks = []
+    
+    class MockResponse:
+        status_code = 204
+    
+    def mock_post(url, json=None, timeout=None):
+        posted_chunks.append(json["content"])
+        return MockResponse()
+        
+    monkeypatch.setattr("requests.post", mock_post)
+    
+    # Create a message that will trigger chunking
+    # Each stock block is ~65 chars. 40 blocks ~ 2600 chars.
+    blocks = []
+    for i in range(40):
+        block = f"STOCK_{i}\n```yaml\nTrigger: 04-05-2026\nPrice: {i*100}\nScore: {i*10}\n```"
+        blocks.append(block)
+    
+    large_message = "\n\n".join(blocks)
+    
+    result = post_to_discord(large_message, "https://example.com/webhook")
+    
+    assert result is True
+    assert len(posted_chunks) > 1
+    
+    for chunk in posted_chunks:
+        # Each chunk should have an even number of triple backticks
+        assert chunk.count("```") % 2 == 0
+        # If it contains yaml content without an opening tag, it's a fail
+        if "Price:" in chunk and "```yaml" not in chunk:
+            # Check if it's the start of a chunk that was split
+            assert chunk.startswith("```yaml")
+
+
+
 
 def test_calculate_r_multiple_long():
     """Test R-multiple calculation for long strategy."""

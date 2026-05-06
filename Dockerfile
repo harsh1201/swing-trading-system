@@ -14,5 +14,9 @@ COPY . .
 # DISCORD_LONG_WEBHOOK_URL
 # DISCORD_SHORT_WEBHOOK_URL
 
-# Default command: run the continuous background scheduler
-CMD ["python", "-u", "scheduler.py"]
+# Make entrypoint script executable
+RUN chmod +x entrypoint.sh
+
+# Default command: run the entrypoint script
+CMD ["./entrypoint.sh"]
+
