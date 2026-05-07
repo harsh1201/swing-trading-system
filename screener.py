@@ -35,6 +35,7 @@ from typing import TypedDict, List
 
 import pandas as pd
 from datetime import datetime, timedelta
+import pytz
 from data.cache    import fetch_ohlcv, DataCache
 from data.earnings import get_earnings_dates
 
@@ -71,6 +72,7 @@ from config.settings import (
     DISCORD_PORTFOLIO_WEBHOOK,
     DISCORD_LONG_SIGNALS_WEBHOOK,
     DISCORD_SHORT_SIGNALS_WEBHOOK,
+    TIMEZONE,
 )
 from strategies.long_breakout import (
     TrendResult,
@@ -144,6 +146,18 @@ class ScreenerSetup(TypedDict):
     vol: VolumeResult
     gap: GapUpResult
     score: ScoreResult
+
+
+# ── Timezone Helper ───────────────────────────────────────────────────────────
+
+def get_now() -> datetime:
+    """Return current time in the configured timezone."""
+    ist = pytz.timezone(TIMEZONE)
+    return datetime.now(ist)
+
+def get_today_str() -> str:
+    """Return today's date string in DD-MM-YYYY format in the configured timezone."""
+    return get_now().strftime("%d-%m-%Y")
 
 
 # ── Discord Integration ─────────────────────────────────────────────────────────
@@ -233,18 +247,20 @@ def format_trade_row(t: dict) -> str:
     
     # Calculate days
     from datetime import datetime
-    today = datetime.now()
+    today = get_now()
     days_info = ""
     if t["status"] == "PENDING" and added_date:
         try:
-            d = datetime.strptime(added_date, "%d-%m-%Y")
+            ist = pytz.timezone(TIMEZONE)
+            d = datetime.strptime(added_date, "%d-%m-%Y").replace(tzinfo=ist)
             days = (today - d).days
             days_info = f" | +{days}d"
         except:
             pass
     elif t["status"] == "ACTIVE" and trigger_date:
         try:
-            d = datetime.strptime(trigger_date, "%d-%m-%Y")
+            ist = pytz.timezone(TIMEZONE)
+            d = datetime.strptime(trigger_date, "%d-%m-%Y").replace(tzinfo=ist)
             days = (today - d).days
             days_info = f" | {days}d"
         except:
@@ -314,7 +330,7 @@ def format_portfolio_for_discord(trades: List[PortfolioTrade], strategy: str) ->
     
     direction_label = "LONG" if strategy == "long_breakout" else "SHORT"
     
-    date_str = datetime.now().strftime("%d %b %Y, %H:%M")
+    date_str = get_now().strftime("%d %b %Y, %H:%M")
     
     lines = []
     
@@ -401,7 +417,7 @@ def send_signals_to_discord(setups: List[dict], strategy: str) -> None:
     if not webhook or not setups:
         return
     
-    date_str = datetime.now().strftime("%d %b %Y")
+    date_str = get_now().strftime("%d %b %Y")
     direction = "LONG" if strategy == "long_breakout" else "SHORT"
     emoji = "🟢" if direction == "LONG" else "🔴"
     
@@ -486,6 +502,11 @@ def is_near_earnings(earnings_dates: list[datetime], today: datetime) -> bool:
     """
     if not earnings_dates:
         return False
+    
+    # If today is aware, make it naive for comparison with naive earnings dates
+    if today.tzinfo is not None:
+        today = today.replace(tzinfo=None)
+        
     window_start = today - timedelta(days=EARNINGS_LOOKBACK_DAYS)
     window_end   = today + timedelta(days=EARNINGS_LOOKAHEAD_DAYS)
     return any(window_start <= d <= window_end for d in earnings_dates)
@@ -718,8 +739,10 @@ def _days_since(date_str: str) -> int | None:
     if not date_str:
         return None
     try:
-        trade_date = datetime.strptime(date_str, "%d-%m-%Y")
-        return (datetime.today() - trade_date).days
+        ist = pytz.timezone(TIMEZONE)
+        trade_date = datetime.strptime(date_str, "%d-%m-%Y").replace(tzinfo=ist)
+        today = datetime.now(ist)
+        return (today - trade_date).days
     except ValueError:
         return None
 
@@ -974,7 +997,7 @@ def add_to_portfolio(ticker: str, name: str, strategy: str, entry: float, sl: fl
         "entry": entry,
         "stop_loss": sl,
         "target": target,
-        "date_added": datetime.today().strftime("%d-%m-%Y"),
+        "date_added": get_today_str(),
         "entry_trigger_date": "",
         "exit_date": "",
         "outcome": "",
@@ -989,7 +1012,7 @@ def run_screener() -> None:
     """Execute the full scan and print results."""
     width   = 72
     total   = len(STOCKS)
-    today   = datetime.today()
+    today   = get_now()
     scanned = skipped = earnings_skipped = 0
     ema_passed = coil_passed = risk_passed = vol_passed = candle_passed = 0
     final_setups: list[ScreenerSetup] = []
@@ -1440,7 +1463,7 @@ def run_screener_short() -> None:
     """Execute the full SHORT breakdown scan and print results."""
     width   = 72
     total   = len(STOCKS)
-    today   = datetime.today()
+    today   = get_now()
     scanned = skipped = earnings_skipped = 0
     ema_passed = coil_passed = risk_passed = vol_passed = candle_passed = 0
     final_setups: list[dict] = []

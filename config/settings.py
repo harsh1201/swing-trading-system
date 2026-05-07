@@ -4,6 +4,9 @@ config/settings.py — All tunable constants for the swing-trading system.
 Import from here in every module; never hard-code these values elsewhere.
 """
 
+# ── Timezone ──────────────────────────────────────────────────────────────────
+TIMEZONE = "Asia/Kolkata"
+
 # ── Index ──────────────────────────────────────────────────────────────────────
 NIFTY_TICKER = "^NSEI"
 

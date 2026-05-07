@@ -1,7 +1,7 @@
 # AGENTS.md - Swing Trading System Context
 
 > **Last Updated:** 2026-05-07
-> **Version:** 1.16 (Discord Formatting Fixed)
+> **Version:** 1.17 (IST Timezone Enforcement)
 > **Maintainer:** Project Owner
 
 
@@ -271,6 +271,16 @@ Portfolio summary auto-posts to Discord when screener runs.
 ---
 
 ## Changelog
+
+### 2026-05-07 (v1.17 - IST Timezone Enforcement)
+
+### Added
+- **IST Timezone Support**: All system outputs (Discord, Backtest, Console) now correctly reflect India Standard Time (IST).
+- **Centralized Timezone Config**: Added `TIMEZONE = "Asia/Kolkata"` to `config/settings.py`.
+
+### Fixed
+- **Timezone Inconsistency**: Fixed UTC display in Discord headers and console reports.
+- **Datetime Awareness Fixes**: Standardized all datetime objects in `screener.py` and `backtest.py` to be timezone-aware (IST) to prevent comparison errors.
 
 ### 2026-05-07 (v1.16 - Discord Formatting Fixed)
 

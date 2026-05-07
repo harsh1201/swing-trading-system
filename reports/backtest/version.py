@@ -7,10 +7,17 @@ Saves backtest results with timestamps and allows comparison between runs.
 import json
 import os
 from datetime import datetime
+import pytz
 from typing import Any
 
 REPORTS_DIR = os.path.dirname(os.path.abspath(__file__))
 HISTORY_FILE = os.path.join(REPORTS_DIR, "history.json")
+
+# Import TIMEZONE inside the function to avoid circular imports if any
+def get_ist_now():
+    from config.settings import TIMEZONE
+    ist = pytz.timezone(TIMEZONE)
+    return datetime.now(ist)
 
 
 def save_backtest_result(
@@ -30,7 +37,7 @@ def save_backtest_result(
     Returns the saved result dict.
     """
     result = {
-        "timestamp": datetime.now().isoformat(),
+        "timestamp": get_ist_now().isoformat(),
         "strategy": strategy,
         "metrics": {
             "total_trades": total_trades,

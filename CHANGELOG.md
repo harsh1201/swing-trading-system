@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.17] - 2026-05-07
+
+### Added
+- **IST Timezone Support**: Integrated `pytz` and added `TIMEZONE` setting (default: "Asia/Kolkata") to ensure all system outputs (Discord alerts, backtest summaries, console logs) are correctly localized to India Standard Time.
+
+### Fixed
+- **Timezone Inconsistency**: Resolved observed UTC-based time display in Discord alerts and console reports by using timezone-aware datetime objects.
+- **Naive/Aware Datetime Comparisons**: Fixed potential crashes in `screener.py` by ensuring all stored and current dates are consistently timezone-aware (IST) before comparison.
+
 ## [1.16] - 2026-05-07
 
 ### Fixed

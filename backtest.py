@@ -43,7 +43,8 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
 # ── Shared imports ────────────────────────────────────────────────────────────
-from datetime import datetime
+from datetime import datetime, timedelta
+import pytz
 
 try:
     from reports.backtest.version import save_backtest_result
@@ -76,6 +77,7 @@ from config.settings import (
     VOLUME_AVG_PERIOD,
     WALK_FORWARD_SPLIT_YEAR,
     DISCORD_PORTFOLIO_WEBHOOK,
+    TIMEZONE,
 )
 from config.stocks import SECTORS, STOCKS
 from data.cache import fetch_ohlcv
@@ -98,6 +100,18 @@ from strategies.short_breakout import (
     get_market_regime_short,
     score_short_breakout,
 )
+
+# ── Timezone Helper ───────────────────────────────────────────────────────────
+
+def get_now() -> datetime:
+    """Return current time in the configured timezone."""
+    ist = pytz.timezone(TIMEZONE)
+    return datetime.now(ist)
+
+def get_today_str() -> str:
+    """Return today's date string in DD-MM-YYYY format in the configured timezone."""
+    return get_now().strftime("%d-%m-%Y")
+
 
 # ── Type definitions ─────────────────────────────────────────────────────────
 
@@ -861,7 +875,7 @@ def send_backtest_to_discord(strategy: str, trades: list[Trade], final_equity: f
     avg_loss = round(float(sum(t["pnl_pct"] for t in trades if t["outcome"] == "loss") / losses), 2) if losses else 0.0
     avg_rr = round(float(avg_win / avg_loss), 2) if avg_loss != 0 else 0.0
     
-    date_str = datetime.now().strftime("%d %b %Y, %H:%M")
+    date_str = get_now().strftime("%d %b %Y, %H:%M")
     direction = "LONG" if strategy == "long_breakout" else "SHORT"
     emoji = "🟢" if direction == "LONG" else "🔴"
     
@@ -901,7 +915,7 @@ def run_backtest_strategy(export: bool = False, refresh: bool = True) -> None:
     print(
         f"{f'Coil {COIL_CANDLES}c  Range<{int(MAX_RANGE_PCT)}%  NearHigh<{int(NEAR_HIGH_PCT)}%  RR 1:{int(REWARD_RATIO)}':^{width}}"
     )
-    print(f"{'Run date : ' + datetime.today().strftime('%d-%m-%Y'):^{width}}")
+    print(f"{'Run date : ' + get_today_str():^{width}}")
     print("=" * width)
 
     print("\n  Fetching data ...\n")
@@ -1465,7 +1479,7 @@ def run_backtest_strategy_short(export: bool = False, refresh: bool = True) -> N
     print(
         f"{f'Coil {COIL_CANDLES}c  Range<{int(MAX_RANGE_PCT)}%  NearLow<{int(NEAR_HIGH_PCT)}%  RR 1:{int(REWARD_RATIO)}':^{width}}"
     )
-    print(f"{'Run date : ' + datetime.today().strftime('%d-%m-%Y'):^{width}}")
+    print(f"{'Run date : ' + get_today_str():^{width}}")
     print("=" * width)
 
     print("\n  Fetching data ...\n")
