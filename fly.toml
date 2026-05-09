@@ -1,0 +1,25 @@
+# fly.toml app configuration file generated for swing-trading-system on 2026-05-01T01:20:28+05:30
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'swing-trading-system'
+primary_region = 'bom'
+
+[build]
+  dockerfile = 'Dockerfile'
+
+[env]
+  LIVE_MODE = 'True'
+
+[processes]
+  app = './entrypoint.sh'
+
+[[mounts]]
+  source = 'swing_data'
+  destination = '/app/storage'
+
+[[vm]]
+  memory = '1gb'
+  cpus = 1
+  memory_mb = 1024

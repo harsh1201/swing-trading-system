@@ -136,10 +136,22 @@ def test_check_gap_condition():
 
 def test_trend_score_variations():
     assert _trend_score(-1) == 0.0
-    assert _trend_score(0.5) == 12.5
-    assert _trend_score(2.0) == 25.0
-    assert _trend_score(5.0) == 18.75
-    assert round(_trend_score(10.0), 2) == 4.17
+    assert _trend_score(0.5) == 20.0
+    assert _trend_score(2.0) == 40.0
+    assert _trend_score(5.0) == 30.0
+    assert round(_trend_score(10.0), 2) == 6.67
+
+def test_score_uses_config_weights():
+    """Verify score calculation uses config weights instead of hardcoded values."""
+    from config.settings import SCORE_WEIGHT_RISK, SCORE_WEIGHT_RANGE, SCORE_WEIGHT_TREND
+    
+    trend = {"close": 105, "ema50": 100, "ema200": 90}
+    coil = {"period_high": 102, "period_low": 100, "range_pct": 2.0, "gap_to_high_pct": 1.0}
+    result = score_long_breakout(trend, coil)
+    
+    expected_total = SCORE_WEIGHT_RISK + SCORE_WEIGHT_RANGE + SCORE_WEIGHT_TREND
+    assert expected_total == 100, "Config weights should sum to 100"
+    assert result["total"] <= expected_total, "Total score should not exceed sum of weights"
 
 def test_calculate_market_breadth(sample_df):
     stock2 = sample_df.copy()
@@ -197,8 +209,13 @@ def test_is_market_bullish_wrapper(sample_df):
 def test_check_volume_edge_cases(sample_df):
     # idx < VOLUME_AVG_PERIOD (252, 255)
     assert check_volume(sample_df, idx=5) is None
-    # surge_ratio < VOLUME_MIN_RATIO (262-263 covered, but let's be sure)
-    sample_df["Volume"] = 100
+    # With VOLUME_MIN_RATIO = 1.0, surge_ratio >= 1.0 passes
+    # With equal volume (1000), surge_ratio = 1.0 which equals threshold, so it passes
+    result = check_volume(sample_df, idx=25)
+    assert result is not None
+    assert result["surge_ratio"] == 1.0
+    # Test with very low volume to get None (50 / 1000 = 0.05 < 1.0)
+    sample_df.loc[sample_df.index[25], "Volume"] = 50
     assert check_volume(sample_df, idx=25) is None
 
 def test_check_gap_condition_zero_entry():

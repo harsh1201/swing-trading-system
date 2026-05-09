@@ -35,6 +35,7 @@ from typing import TypedDict, List
 
 import pandas as pd
 from datetime import datetime, timedelta
+import pytz
 from data.cache    import fetch_ohlcv, DataCache
 from data.earnings import get_earnings_dates
 
@@ -62,12 +63,23 @@ from config.settings import (
     RISK_PER_TRADE,
     MIN_AVG_TURNOVER,
     MIN_PRICE,
+    PENDING_EXPIRY_DAYS,
+    CLOSED_CLEANUP_DAYS,
+    MAX_ACTIVE_DAYS,
+    SCORE_WEIGHT_RISK,
+    SCORE_WEIGHT_RANGE,
+    SCORE_WEIGHT_TREND,
+    DISCORD_PORTFOLIO_WEBHOOK,
+    DISCORD_LONG_SIGNALS_WEBHOOK,
+    DISCORD_SHORT_SIGNALS_WEBHOOK,
+    TIMEZONE,
 )
 from strategies.long_breakout import (
     TrendResult,
     ConsolidationResult,
     TradeSetupResult,
     VolumeResult,
+    CandleStrengthResult,
     GapUpResult,
     ScoreResult,
     add_indicators,
@@ -75,6 +87,7 @@ from strategies.long_breakout import (
     check_trend,
     check_consolidation,
     check_volume,
+    check_candle_strength,
     check_liquidity,
     check_gap_up,
     score_long_breakout,
@@ -106,8 +119,12 @@ class PortfolioTrade(TypedDict):
     stop_loss: float
     target: float
     date_added: str
+    entry_trigger_date: str  # When entry actually triggered (PENDING → ACTIVE)
     exit_date: str
     outcome: str
+    r_multiple: float  # Actual R achieved (negative for loss)
+    current_price: float  # Latest price for tracking
+    score: float  # Setup score at entry time (0-100)
 
 class MarketRegimeInfo(TypedDict):
     close: float | None
@@ -131,7 +148,296 @@ class ScreenerSetup(TypedDict):
     score: ScoreResult
 
 
-# ── Data helper ───────────────────────────────────────────────────────────────
+# ── Timezone Helper ───────────────────────────────────────────────────────────
+
+def get_now() -> datetime:
+    """Return current time in the configured timezone."""
+    ist = pytz.timezone(TIMEZONE)
+    return datetime.now(ist)
+
+def get_today_str() -> str:
+    """Return today's date string in DD-MM-YYYY format in the configured timezone."""
+    return get_now().strftime("%d-%m-%Y")
+
+
+# ── Discord Integration ─────────────────────────────────────────────────────────
+
+def post_to_discord(message: str, webhook_url: str) -> bool:
+    """Post a message to Discord via webhook. Auto-chunks if > 1900 chars."""
+    if not webhook_url:
+        print("  [!] Discord webhook URL not configured")
+        return False
+    
+    try:
+        import requests
+        
+        # Split message into chunks of max 1900 chars (breaking at newlines)
+        lines = message.split('\n')
+        chunks = []
+        current_chunk = ""
+        in_code_block = False
+        code_block_lang = "yaml"  # Default language for this project
+        
+        for line in lines:
+            # Check if this line toggles code block state
+            line_has_toggle = "```" in line
+            
+            # Check if adding this line (plus potential closure) would exceed the limit
+            # We add a buffer for closure (```) and re-opening (```yaml\n)
+            limit = 1900
+            potential_len = len(current_chunk) + len(line) + 2
+            if in_code_block:
+                potential_len += 10  # Buffer for closure/re-opening
+            
+            if potential_len > limit and current_chunk:
+                # If we are in a code block, close it before finishing this chunk
+                if in_code_block:
+                    current_chunk += "\n```"
+                
+                chunks.append(current_chunk)
+                
+                # If we were in a code block, re-open it in the next chunk
+                if in_code_block:
+                    current_chunk = f"```{code_block_lang}\n" + line
+                else:
+                    current_chunk = line
+            else:
+                current_chunk += ("\n" + line) if current_chunk else line
+            
+            # Update code block state AFTER checking for split
+            if line_has_toggle:
+                in_code_block = not in_code_block
+                # If we just opened a block, try to capture the language
+                if in_code_block and "```" in line and len(line.strip()) > 3:
+                    potential_lang = line.strip().replace("```", "")
+                    if potential_lang:
+                        code_block_lang = potential_lang
+        
+        if current_chunk:
+            chunks.append(current_chunk)
+            
+        success = True
+        for chunk in chunks:
+            response = requests.post(webhook_url, json={"content": chunk}, timeout=10)
+            if response.status_code != 204:
+                print(f"  [!] Discord error: HTTP {response.status_code}")
+                success = False
+        return success
+    except Exception as e:
+        print(f"  [!] Discord error: {e}")
+        return False
+
+
+def format_trade_row(t: dict) -> str:
+    """Format a single trade as a Discord message row."""
+    ticker = t["ticker"].replace(".NS", "")
+    direction = "LONG" if t.get("strategy") == "long_breakout" else "SHORT"
+    status_emoji = {"ACTIVE": "🟢", "PENDING": "⏳", "CLOSED": "✅"}.get(t["status"], "⚪")
+    
+    entry = t.get("entry", 0)
+    sl = t.get("stop_loss", 0)
+    target = t.get("target", 0)
+    curr_price = t.get("current_price", entry)
+    r_val = t.get("r_multiple", 0)
+    
+    # Date fields
+    added_date = t.get("date_added", "")
+    trigger_date = t.get("entry_trigger_date", "")
+    exit_date = t.get("exit_date", "")
+    
+    # Calculate days
+    from datetime import datetime
+    today = get_now()
+    days_info = ""
+    if t["status"] == "PENDING" and added_date:
+        try:
+            ist = pytz.timezone(TIMEZONE)
+            d = datetime.strptime(added_date, "%d-%m-%Y").replace(tzinfo=ist)
+            days = (today - d).days
+            days_info = f" | +{days}d"
+        except:
+            pass
+    elif t["status"] == "ACTIVE" and trigger_date:
+        try:
+            ist = pytz.timezone(TIMEZONE)
+            d = datetime.strptime(trigger_date, "%d-%m-%Y").replace(tzinfo=ist)
+            days = (today - d).days
+            days_info = f" | {days}d"
+        except:
+            pass
+    elif t["status"] == "CLOSED" and exit_date:
+        outcome = t.get("outcome", "")
+        emoji = "✅" if outcome == "WIN" else "❌" if outcome == "LOSS" else "➖"
+        days_info = f" | {emoji}"
+    
+    entry_str = f"₹{entry:,.0f}" if entry and entry > 0 else "--"
+    sl_str = f"₹{sl:,.0f}" if sl and sl > 0 else "--"
+    target_str = f"₹{target:,.0f}" if target and target > 0 else "--"
+    curr_str = f"₹{curr_price:,.0f}" if curr_price and curr_price > 0 else "--"
+    r_str = f"{r_val:+.2f}R" if r_val != 0 else "--"
+
+    # Score from setup time
+    score_val = t.get("score", 0)
+    score_str = f"{score_val:.0f}" if score_val > 0 else "--"
+
+    # Date info - show added for PENDING, triggered for ACTIVE, exit for CLOSED
+    if t["status"] == "PENDING" and added_date:
+        date_info = f"Added: {added_date}{days_info}"
+    elif t["status"] == "ACTIVE" and trigger_date:
+        date_info = f"Trigger: {trigger_date}{days_info}"
+    elif t["status"] == "CLOSED" and exit_date:
+        date_info = f"Exit: {exit_date}"
+    else:
+        date_info = "Added: " + added_date if added_date else ""
+    
+    line1 = f"{status_emoji} **{ticker}** [{direction}]"
+    line2 = f"```yaml"
+    line3 = f"{date_info} | R: {r_str}" if date_info else f"R: {r_str}"
+    line4 = f"Current   : {curr_str}"
+    line5 = f"Entry     : {entry_str}"
+    line6 = f"Stop Loss : {sl_str}"
+    line7 = f"Target    : {target_str}"
+    line8 = f"Score     : {score_str}"
+    line9 = f"```"
+
+    return f"{line1}\n{line2}\n{line3}\n{line4}\n{line5}\n{line6}\n{line7}\n{line8}\n{line9}"
+
+
+def format_portfolio_for_discord(trades: List[PortfolioTrade], strategy: str) -> str:
+    """Format full portfolio with all trades as Discord messages."""
+    
+    # Filter trades by the current strategy
+    trades = [t for t in trades if t.get("strategy") == strategy]
+    
+    if not trades:
+        return f"📭 **Portfolio is empty ({'LONG' if strategy == 'long_breakout' else 'SHORT'})**"
+    
+    active = [t for t in trades if t["status"] == "ACTIVE"]
+    pending = [t for t in trades if t["status"] == "PENDING"]
+    closed = [t for t in trades if t["status"] == "CLOSED"]
+    
+    closed_wins = [t for t in closed if t.get("outcome") == "WIN"]
+    closed_losses = [t for t in closed if t.get("outcome") == "LOSS"]
+    
+    total_closed = len(closed)
+    win_count = len(closed_wins)
+    loss_count = len(closed_losses)
+    win_rate = (win_count / total_closed * 100) if total_closed > 0 else 0
+    
+    r_values = [t.get("r_multiple", 0) for t in closed if t.get("r_multiple", 0) != 0]
+    avg_r = sum(r_values) / len(r_values) if r_values else 0
+    total_r = sum(r_values) if r_values else 0
+    
+    direction_label = "LONG" if strategy == "long_breakout" else "SHORT"
+    
+    date_str = get_now().strftime("%d %b %Y, %H:%M")
+    
+    lines = []
+    
+    lines.append(f"📊 **SWING TRADING PORTFOLIO ({direction_label})**")
+    lines.append(f"*{date_str}*")
+    lines.append("")
+    
+    lines.append(f"**═══ SUMMARY ═══**")
+    lines.append(f"🟢 Active: **{len(active)}**")
+    lines.append(f"⏳ Pending: **{len(pending)}**")
+    lines.append(f"✅ Closed: **{total_closed}** (W:{win_count} | L:{loss_count})")
+    if total_closed > 0:
+        lines.append(f"📈 Win Rate: **{win_rate:.1f}%** | Avg R: **{avg_r:+.2f}** | Total R: **{total_r:+.2f}R**")
+    lines.append("")
+    
+    if active:
+        lines.append(f"**═══ ACTIVE ({len(active)}) ═══**")
+        for t in active:
+            lines.append(format_trade_row(t))
+        lines.append("")
+    
+    if pending:
+        lines.append(f"**═══ PENDING ({len(pending)}) ═══**")
+        for t in pending:
+            lines.append(format_trade_row(t))
+        lines.append("")
+    
+    if closed:
+        lines.append(f"**═══ CLOSED ({len(closed)}) ═══**")
+        for t in closed[-10:]:
+            lines.append(format_trade_row(t))
+        if len(closed) > 10:
+            lines.append(f"_... and {len(closed) - 10} more_")
+    
+    return "\n".join(lines)
+
+
+def send_portfolio_to_discord(trades: List[PortfolioTrade], strategy: str) -> None:
+    """Send portfolio summary to Discord if webhook is configured."""
+    webhook = DISCORD_LONG_SIGNALS_WEBHOOK if strategy == "long_breakout" else DISCORD_SHORT_SIGNALS_WEBHOOK
+    
+    if not webhook:
+        return
+    
+    message = format_portfolio_for_discord(trades, strategy)
+    success = post_to_discord(message, webhook)
+    
+    if success:
+        print("  [+] Portfolio posted to Discord")
+    else:
+        print("  [!] Failed to post to Discord")
+
+
+def format_signal_for_discord(setup: dict, rank: int) -> str:
+    """Format a single signal as Discord message."""
+    t = setup["setup"]
+    ticker = setup["ticker"].replace(".NS", "")
+    score = setup["score"]
+    
+    direction = "LONG" if setup.get("strategy") == "long_breakout" else "SHORT"
+    emoji = "🟢" if direction == "LONG" else "🔴"
+    
+    # Use trend's close as current price (latest bar)
+    curr_close = setup.get("trend", {}).get("close", t["entry"])
+    
+    lines = []
+    lines.append(f"{emoji} **#{rank} {ticker}** [{direction}]")
+    lines.append(f"```yaml")
+    lines.append(f"Added     : {setup.get('signal_date', '')}")
+    lines.append(f"Current   : ₹{curr_close:,.0f}")
+    lines.append(f"Entry     : ₹{t['entry']:,.0f}")
+    lines.append(f"Stop Loss : ₹{t['stop_loss']:,.0f}")
+    lines.append(f"Target    : ₹{t['target']:,.0f}")
+    lines.append(f"Score     : {score['total']:.1f}/100")
+    lines.append(f"Risk      : {t['risk_pct']:.1f}%")
+    lines.append(f"```")
+
+    return "\n".join(lines)
+
+def send_signals_to_discord(setups: List[dict], strategy: str) -> None:
+    """Send trade signals to Discord if webhook is configured."""
+    webhook = DISCORD_LONG_SIGNALS_WEBHOOK if strategy == "long_breakout" else DISCORD_SHORT_SIGNALS_WEBHOOK
+    
+    if not webhook or not setups:
+        return
+    
+    date_str = get_now().strftime("%d %b %Y")
+    direction = "LONG" if strategy == "long_breakout" else "SHORT"
+    emoji = "🟢" if direction == "LONG" else "🔴"
+    
+    lines = []
+    lines.append(f"{emoji} **{direction} TRADE SIGNALS** - {date_str}")
+    lines.append(f"Found **{len(setups)}** setup(s)")
+    lines.append("")
+    
+    for i, setup in enumerate(setups[:5], 1):
+        lines.append(format_signal_for_discord(setup, i))
+        lines.append("")
+    
+    message = "\n".join(lines)
+    success = post_to_discord(message, webhook)
+    
+    if success:
+        print(f"  [+] {direction} signals posted to Discord")
+    else:
+        print(f"  [!] Failed to post {direction} signals to Discord")
+
 
 def fetch_data(
     ticker:  str,
@@ -196,6 +502,11 @@ def is_near_earnings(earnings_dates: list[datetime], today: datetime) -> bool:
     """
     if not earnings_dates:
         return False
+    
+    # If today is aware, make it naive for comparison with naive earnings dates
+    if today.tzinfo is not None:
+        today = today.replace(tzinfo=None)
+        
     window_start = today - timedelta(days=EARNINGS_LOOKBACK_DAYS)
     window_end   = today + timedelta(days=EARNINGS_LOOKAHEAD_DAYS)
     return any(window_start <= d <= window_end for d in earnings_dates)
@@ -215,10 +526,10 @@ def _score_bar(score: float, width: int = 20) -> str:
 
 
 def print_trade_card(
-    rank:   int,
+    rank:    int,
     name:   str,
-    ticker: str,
-    trend:  TrendResult,
+    ticker:  str,
+    trend:   TrendResult,
     cons:   ConsolidationResult,
     setup:  TradeSetupResult,
     vol:    VolumeResult,
@@ -236,11 +547,11 @@ def print_trade_card(
     print(f"  {name}  ({ticker})")
     print("=" * width)
 
-    # Score breakdown
+# Score breakdown
     print(f"  {'Overall Score':<22}  {_score_bar(score['total'])}")
-    print(f"  {'  Risk score':<22}  {score['risk_score']:>5.1f} / 40"
+    print(f"  {'  Risk score':<22}  {score['risk_score']:>5.1f} / {SCORE_WEIGHT_RISK}"
           f"   (lower risk % is better)")
-    print(f"  {'  Range score':<22}  {score['range_score']:>5.1f} / 35"
+    print(f"  {'  Range score':<22}  {score['range_score']:>5.1f} / {SCORE_WEIGHT_RANGE}"
           f"   (tighter coil is better)")
     g = score["ema50_gap_pct"]
     if g < 1.0:
@@ -251,7 +562,7 @@ def print_trade_card(
         zone = "mild extension (4–6%)"
     else:
         zone = "overextended (>6%)"
-    print(f"  {'  Trend score':<22}  {score['trend_score']:>5.1f} / 25"
+    print(f"  {'  Trend score':<22}  {score['trend_score']:>5.1f} / {SCORE_WEIGHT_TREND}"
           f"   {g:+.2f}% vs EMA50  [{zone}]")
     print()
 
@@ -351,9 +662,9 @@ def print_execution_summary(
         "STRONG_BULL": ("✅", "STRONG BULL — full capacity"),
         "EARLY_TREND": ("⚡", "EARLY TREND — reduced capacity"),
         "BEAR":        ("🚫", "BEAR — no trades today"),
-        "UNKNOWN":     ("❓", "unknown — proceeding with caution"),
+        "UNKNOWN":     ("⚪", "REGIME OFF — all conditions allowed"),
     }
-    r_icon, r_text = _reg_display.get(regime_label, ("❓", regime_label))
+    r_icon, r_text = _reg_display.get(regime_label, ("⚪", "REGIME OFF"))
     print(f"  Market regime      {r_icon}  {r_text}")
     min_cr = MIN_AVG_TURNOVER // 1_00_00_000
     print(f"  Liquidity filter   ✅  active (min Rs.{min_cr} Cr avg daily turnover)")
@@ -406,9 +717,10 @@ def print_execution_summary(
 
 def _get_portfolio_cache() -> DataCache:
     """Return the DataCache instance for the portfolio."""
-    # Place it in the same data folder as CSVs
-    data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
-    return DataCache(os.path.join(data_dir, "portfolio.json"))
+    # Place it in the storage folder to avoid hiding python files
+    storage_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "storage")
+    os.makedirs(storage_dir, exist_ok=True)
+    return DataCache(os.path.join(storage_dir, "portfolio.json"))
 
 def load_portfolio() -> List[PortfolioTrade]:
     """Load tracked trades from disk."""
@@ -421,31 +733,172 @@ def save_portfolio(trades: List[PortfolioTrade]) -> None:
     cache = _get_portfolio_cache()
     cache.save("portfolio", {"trades": trades})
 
-def update_portfolio() -> None:
+
+def _days_since(date_str: str) -> int | None:
+    """Return number of days since date_str (DD-MM-YYYY), or None if invalid."""
+    if not date_str:
+        return None
+    try:
+        ist = pytz.timezone(TIMEZONE)
+        trade_date = datetime.strptime(date_str, "%d-%m-%Y").replace(tzinfo=ist)
+        today = datetime.now(ist)
+        return (today - trade_date).days
+    except ValueError:
+        return None
+
+
+def cleanup_portfolio(trades: List[PortfolioTrade]) -> tuple[List[PortfolioTrade], dict]:
+    """
+    Remove stale PENDING trades (> PENDING_EXPIRY_DAYS) and old CLOSED trades (> CLOSED_CLEANUP_DAYS).
+    Returns (cleaned_trades, cleanup_stats) where cleanup_stats contains counts of removed trades.
+    """
+    cleaned = []
+    stats = {"pending_expired": 0, "closed_cleaned": 0}
+    
+    for t in trades:
+        days_added = _days_since(t.get("date_added", ""))
+        days_exited = _days_since(t.get("exit_date", ""))
+        days_triggered = _days_since(t.get("entry_trigger_date", ""))
+        
+        if t["status"] == "PENDING":
+            if days_added is not None and days_added > PENDING_EXPIRY_DAYS:
+                stats["pending_expired"] += 1
+                continue
+        elif t["status"] == "CLOSED":
+            if days_exited is not None and days_exited > CLOSED_CLEANUP_DAYS:
+                stats["closed_cleaned"] += 1
+                continue
+        elif t["status"] == "ACTIVE":
+            if days_triggered is None and days_added is not None and days_added > MAX_ACTIVE_DAYS:
+                stats["active_stale"] = stats.get("active_stale", 0) + 1
+                continue
+        
+        cleaned.append(t)
+    
+    return cleaned, stats
+
+
+def _calculate_r_multiple(strategy: str, entry: float, exit_price: float, stop_loss: float) -> float:
+    """Calculate R-multiple based on entry and exit prices."""
+    risk = abs(entry - stop_loss)
+    if risk == 0:
+        return 0.0
+    
+    if strategy == "long_breakout":
+        return (exit_price - entry) / risk
+    else:
+        return (entry - exit_price) / risk
+
+
+def _print_portfolio_summary(trades: List[PortfolioTrade]) -> None:
+    """Print portfolio summary statistics."""
+    if not trades:
+        return
+    
+    active = [t for t in trades if t["status"] == "ACTIVE"]
+    pending = [t for t in trades if t["status"] == "PENDING"]
+    closed = [t for t in trades if t["status"] == "CLOSED"]
+    
+    closed_wins = [t for t in closed if t.get("outcome") == "WIN"]
+    closed_losses = [t for t in closed if t.get("outcome") == "LOSS"]
+    
+    total_closed = len(closed)
+    win_count = len(closed_wins)
+    loss_count = len(closed_losses)
+    win_rate = (win_count / total_closed * 100) if total_closed > 0 else 0
+    
+    r_values = [t.get("r_multiple", 0) for t in closed if t.get("r_multiple", 0) != 0]
+    avg_r = sum(r_values) / len(r_values) if r_values else 0
+    total_r = sum(r_values) if r_values else 0
+    
+    long_active = len([t for t in active if t.get("strategy") == "long_breakout"])
+    short_active = len([t for t in active if t.get("strategy") == "short_breakout"])
+    
+    print(f"\n{'─' * 50}")
+    print(f"  PORTFOLIO SUMMARY")
+    print(f"{'─' * 50}")
+    print(f"  Active: {len(active)} (LONG:{long_active} SHORT:{short_active})  |  Pending: {len(pending)}  |  Closed: {total_closed}")
+    if total_closed > 0:
+        print(f"  Wins: {win_count}  |  Losses: {loss_count}  |  Win Rate: {win_rate:.1f}%")
+        print(f"  Avg R: {avg_r:+.2f}  |  Total R: {total_r:+.2f}R")
+    print(f"{'─' * 50}")
+
+
+def update_portfolio(strategy: str) -> None:
     """
     Fetch latest prices for all tracked trades and update their status.
+    - Cleans up stale PENDING trades (> PENDING_EXPIRY_DAYS)
+    - Cleans up old CLOSED trades (> CLOSED_CLEANUP_DAYS)
+    - Tracks entry_trigger_date when entry triggers
+    - Calculates r_multiple when trade closes
     Prints a summary of active/pending trades.
     """
     trades = load_portfolio()
     if not trades:
         return
 
-    print("\n" + "=" * 72)
-    print(f"{'CURRENT PORTFOLIO TRACKER':^72}")
-    print("=" * 72)
+    # Clean up stale trades first
+    trades, cleanup_stats = cleanup_portfolio(trades)
     
+    parts = []
+    if cleanup_stats.get("pending_expired", 0) > 0:
+        parts.append(f"{cleanup_stats['pending_expired']} PENDING expired")
+    if cleanup_stats.get("closed_cleaned", 0) > 0:
+        parts.append(f"{cleanup_stats['closed_cleaned']} CLOSED removed")
+    
+    if parts:
+        print(f"\n  Portfolio cleanup: {', '.join(parts)}")
+
+    print("\n" + "=" * 90)
+    print(f"{'CURRENT PORTFOLIO TRACKER':^90}")
+    print("=" * 90)
+    
+    # Print portfolio summary header
+    _print_portfolio_summary(trades)
+     
     updated_trades = []
     
-    col = f"{'Ticker':<12} {'Status':<10} {'Entry':>8} {'SL':>8} {'Target':>9} {'Current':>8} {'Update'}"
+    # Sort trades: ACTIVE first, then PENDING, then CLOSED
+    # Within each status, sort by days since relevant date
+    def sort_key(t):
+        status_order = {"ACTIVE": 0, "PENDING": 1, "CLOSED": 2}
+        status_priority = status_order.get(t["status"], 3)
+        
+        if t["status"] == "PENDING":
+            days = _days_since(t.get("date_added", "")) or 0
+        elif t["status"] == "ACTIVE":
+            days = _days_since(t.get("entry_trigger_date", "")) or 0
+        else:
+            days = _days_since(t.get("exit_date", "")) or 0
+        
+        return (status_priority, days)
+    
+    trades.sort(key=sort_key)
+    
+    col = f"{'Ticker':<12} {'Dir':<5} {'Status':<9} {'Added':<11} {'Trigger':<11} {'Exit':<11} {'Days':>4} {'Entry':>8} {'SL':>8} {'Target':>9} {'Current':>9} {'Score':>6} {'R'}"
     print(f"  {col}")
     print(f"  {'-' * len(col)}")
 
     for t in trades:
+        # Ensure all fields exist (backward compatibility)
+        if "r_multiple" not in t:
+            t["r_multiple"] = 0.0
+        if "entry_trigger_date" not in t:
+            t["entry_trigger_date"] = ""
+        if "date_added" not in t:
+            t["date_added"] = ""
+        if "exit_date" not in t:
+            t["exit_date"] = ""
+        if "current_price" not in t:
+            t["current_price"] = t.get("entry", 0)
+        if "score" not in t:
+            t["score"] = 0
+        
         # Fetch latest data
         df = fetch_ohlcv(t["ticker"], days=30, refresh=True)
         if df is None or df.empty:
             updated_trades.append(t)
-            print(f"  {t['ticker']:<12} {t['status']:<10} [NO DATA]")
+            print(f"  {t['ticker']:<12} {t['status']:<9} [NO DATA]")
             continue
 
         df = add_indicators(df)
@@ -454,58 +907,88 @@ def update_portfolio() -> None:
         curr_high = float(last_row["High"])
         curr_low = float(last_row["Low"])
         
+        t["current_price"] = curr_close
         status_change = ""
+        r_display = f"{t['r_multiple']:.2f}" if t["r_multiple"] != 0 else "-"
+        
+        direction = "LONG" if t["strategy"] == "long_breakout" else "SHORT"
+        
+        # Date display based on status
+        added_date = t.get("date_added", "") or "-"
+        trigger_date = t.get("entry_trigger_date", "") or "-"
+        exit_date = t.get("exit_date", "") or "-"
+        
+        if t["status"] == "PENDING":
+            days_since = _days_since(t.get("date_added", ""))
+        elif t["status"] == "ACTIVE":
+            days_since = _days_since(t.get("entry_trigger_date", ""))
+        else:
+            days_since = _days_since(t.get("exit_date", ""))
+        
+        days_str = str(days_since) if days_since is not None else "-"
         
         if t["status"] == "PENDING":
             if t["strategy"] == "long_breakout":
                 if curr_high >= t["entry"]:
                     t["status"] = "ACTIVE"
-                    status_change = "→ TRIGGERED ACTIVE"
+                    t["entry_trigger_date"] = df.index[-1].strftime("%d-%m-%Y")
+                    trigger_date = t["entry_trigger_date"]
+                    status_change = "→ TRIGGERED"
             elif t["strategy"] == "short_breakout":
                 if curr_low <= t["entry"]:
                     t["status"] = "ACTIVE"
-                    status_change = "→ TRIGGERED ACTIVE"
+                    t["entry_trigger_date"] = df.index[-1].strftime("%d-%m-%Y")
+                    trigger_date = t["entry_trigger_date"]
+                    status_change = "→ TRIGGERED"
         
+        exit_price = None
         if t["status"] == "ACTIVE":
             if t["strategy"] == "long_breakout":
                 if curr_low <= t["stop_loss"]:
                     t["status"] = "CLOSED"
                     t["outcome"] = "LOSS"
-                    t["exit_date"] = df.index[-1].strftime("%d-%m-%Y")
-                    status_change = "→ HIT STOP LOSS (CLOSED)"
+                    exit_price = t["stop_loss"]
+                    status_change = "→ SL HIT"
                 elif curr_high >= t["target"]:
                     t["status"] = "CLOSED"
                     t["outcome"] = "WIN"
-                    t["exit_date"] = df.index[-1].strftime("%d-%m-%Y")
-                    status_change = "→ HIT TARGET (CLOSED)"
+                    exit_price = t["target"]
+                    status_change = "→ TARGET HIT"
             elif t["strategy"] == "short_breakout":
                 if curr_high >= t["stop_loss"]:
                     t["status"] = "CLOSED"
                     t["outcome"] = "LOSS"
-                    t["exit_date"] = df.index[-1].strftime("%d-%m-%Y")
-                    status_change = "→ HIT STOP LOSS (CLOSED)"
+                    exit_price = t["stop_loss"]
+                    status_change = "→ SL HIT"
                 elif curr_low <= t["target"]:
                     t["status"] = "CLOSED"
                     t["outcome"] = "WIN"
-                    t["exit_date"] = df.index[-1].strftime("%d-%m-%Y")
-                    status_change = "→ HIT TARGET (CLOSED)"
+                    exit_price = t["target"]
+                    status_change = "→ TARGET HIT"
+            
+            if exit_price is not None:
+                t["exit_date"] = df.index[-1].strftime("%d-%m-%Y")
+                exit_date = t["exit_date"]
+                t["r_multiple"] = round(_calculate_r_multiple(t["strategy"], t["entry"], exit_price, t["stop_loss"]), 2)
+                r_display = f"{t['r_multiple']:.2f}"
 
-        print(f"  {t['ticker']:<12} {t['status']:<10} {t['entry']:>8.2f} {t['stop_loss']:>8.2f} {t['target']:>9.2f} {curr_close:>8.2f} {status_change}")
+        score_display = f"{t['score']:.0f}" if t.get("score", 0) > 0 else "-"
+        print(f"  {t['ticker']:<12} {direction:<5} {t['status']:<9} {added_date:<11} {trigger_date:<11} {exit_date:<11} {days_str:>4} {t['entry']:>8.2f} {t['stop_loss']:>8.2f} {t['target']:>9.2f} {curr_close:>9.2f} {score_display:>6} {r_display:>4} {status_change}")
         
         if t["status"] != "CLOSED":
             updated_trades.append(t)
 
     save_portfolio(updated_trades)
-    print("=" * 72 + "\n")
+    print("=" * 90 + "\n")
 
-def add_to_portfolio(ticker: str, name: str, strategy: str, entry: float, sl: float, target: float) -> None:
+def add_to_portfolio(ticker: str, name: str, strategy: str, entry: float, sl: float, target: float, score: float = 0) -> None:
     """Add a new setup to the portfolio if it is not already tracked."""
     trades = load_portfolio()
-    
+
     # Avoid duplicates
     if any(t["ticker"] == ticker and t["strategy"] == strategy for t in trades):
         return
-        
+
     new_trade: PortfolioTrade = {
         "ticker": ticker,
         "name": name,
@@ -514,9 +997,13 @@ def add_to_portfolio(ticker: str, name: str, strategy: str, entry: float, sl: fl
         "entry": entry,
         "stop_loss": sl,
         "target": target,
-        "date_added": datetime.today().strftime("%d-%m-%Y"),
+        "date_added": get_today_str(),
+        "entry_trigger_date": "",
         "exit_date": "",
-        "outcome": ""
+        "outcome": "",
+        "r_multiple": 0.0,
+        "current_price": entry,
+        "score": score,
     }
     trades.append(new_trade)
     save_portfolio(trades)
@@ -525,9 +1012,9 @@ def run_screener() -> None:
     """Execute the full scan and print results."""
     width   = 72
     total   = len(STOCKS)
-    today   = datetime.today()
+    today   = get_now()
     scanned = skipped = earnings_skipped = 0
-    ema_passed = coil_passed = risk_passed = vol_passed = 0
+    ema_passed = coil_passed = risk_passed = vol_passed = candle_passed = 0
     final_setups: list[ScreenerSetup] = []
 
     # ── Header ────────────────────────────────────────────────────────────────
@@ -535,74 +1022,26 @@ def run_screener() -> None:
     print(f"{'SWING TRADING SCREENER  -  INDIAN STOCKS (NSE)':^{width}}")
     if LIVE_MODE:
         print(f"{'[LIVE MODE — clean output]':^{width}}")
-    print(f"{'Stage 0 : Market Regime  (Nifty 50 > EMA50)':^{width}}")
+    print(f"{'Stage 0 : Market Regime filter disabled':^{width}}")
     print(f"{'Stage 1 : Close > EMA50 > EMA200':^{width}}")
     print(f"{'Stage 2 : Coil  (range < ' + str(MAX_RANGE_PCT) + '%, near high < ' + str(NEAR_HIGH_PCT) + '%)':^{width}}")
     gap_pct_str = f"{int((GAP_UP_THRESHOLD - 1) * 100)}%"
     print(f"{'Stage 3 : Risk < ' + str(MAX_RISK_PCT) + '%  |  Vol > ' + str(VOLUME_MIN_RATIO) + 'x  |  No gap-up > ' + gap_pct_str + '  |  RR 1:' + str(int(REWARD_RATIO)):^{width}}")
     print(f"{'Stage 3d: Earnings blackout (' + str(EARNINGS_LOOKBACK_DAYS) + 'd / ' + str(EARNINGS_LOOKAHEAD_DAYS) + 'd)':^{width}}")
     print(f"{'Date : ' + today.strftime('%d-%m-%Y  %H:%M'):^{width}}")
-    print(f"{'Universe : ' + str(total) + ' stocks':^{width}}")
-    print("=" * width)
 
     # ── Update tracked trades first ───────────────────────────────────────────
-    update_portfolio()
+    update_portfolio("long_breakout")
 
-    # ── Stage 0 : Market regime ──────────────────────────────────────────────────
+# ── Stage 0 : Market regime filter intentionally disabled ──────────────────
+    market_ok = True
+    regime_label = "UNKNOWN"
+    print("\n  Market regime filter disabled — skipping Nifty EMA gate.\n")
 
-    print(f"\n  Checking market regime ({NIFTY_TICKER}) ...", end="  ", flush=True)
-    regime = check_market_regime()
-    print("done.\n")
-
-    print("=" * width)
-    print(f"{'MARKET REGIME  —  NIFTY 50':^{width}}")
-    print("=" * width)
-
-    if regime["error"]:
-        print(f"  WARNING: {regime['error']}")
-        print("  Proceeding without market filter (data unavailable).")
-        market_ok    = True
-        regime_label = "UNKNOWN"
-    else:
-        _regime_map = {
-            "STRONG_BULL": ("✅", "STRONG BULL"),
-            "EARLY_TREND": ("⚡", "EARLY TREND  (EMA20 recovery, reduced conviction)"),
-            "BEAR":        ("🚫", "BEAR"),
-        }
-        r_icon, r_text = _regime_map.get(regime["regime"], ("❓", regime["regime"]))
-
-        assert regime["close"] is not None
-        assert regime["ema20"] is not None
-        assert regime["ema50"] is not None
-        gap50     = round(float((regime["close"] - regime["ema50"]) / regime["ema50"] * 100), 2)
-        gap50_sign = "+" if gap50 >= 0 else ""
-        gap20      = round(float((regime["close"] - regime["ema20"]) / regime["ema20"] * 100), 2)
-        gap20_sign = "+" if gap20 >= 0 else ""
-
-        print(f"  {'Nifty Close':<22}  {regime['close']:>10,.2f}")
-        print(f"  {'Nifty EMA 20':<22}  {regime['ema20']:>10,.2f}"
-              f"   ({gap20_sign}{gap20:.2f}%)")
-        print(f"  {'Nifty EMA 50':<22}  {regime['ema50']:>10,.2f}"
-              f"   ({gap50_sign}{gap50:.2f}%)")
-        print(f"  {'Market Status':<22}  {r_icon}  {r_text}")
-        market_ok    = regime["is_bullish"]
-        regime_label = regime["regime"]
-
-    print("=" * width)
-
-    if not market_ok:
-        print()
-        print("  Market is NOT favorable — Nifty is below EMA50 and EMA20 slope "
-              "is negative.")
-        print("  No individual stock trades allowed in a BEAR regime.")
-        print("  Re-run when Nifty shows early recovery (EMA20 slope turns up).")
-        print()
-        if LIVE_MODE:
-            print_execution_summary([], market_ok=False,
-                                    regime_label="BEAR", width=width)
-        return
-
-    print()
+    # Load portfolio once at start - we'll update it but NOT skip based on it
+    # We need to check entry triggers and close trades first
+    portfolio_trades = load_portfolio()
+    portfolio_tickers = {t["ticker"] for t in portfolio_trades}
 
     # ── Scan progress indicator (LIVE_MODE) ───────────────────────────────────
     if LIVE_MODE:
@@ -686,7 +1125,15 @@ def run_screener() -> None:
 
         vol_passed += 1
 
-        # Stage 3c — gap-up
+        # Stage 3c — candle strength (DISABLED Apr 2022 - hurt performance)
+        # candle = check_candle_strength(df)
+        # if candle is None:
+        #     if not LIVE_MODE:
+        #         print("trend+coil+risk+vol ok | weak candle  -> filtered")
+        #     continue
+        # candle_passed += 1
+
+        # Stage 3d — gap-up
         gap = check_gap_up(df, setup["entry"])
         if gap["is_gap_up"]:
             if not LIVE_MODE:
@@ -704,6 +1151,11 @@ def run_screener() -> None:
 
         score = score_long_breakout(trend, coil)
 
+        # Check if already in portfolio (skip PENDING/ACTIVE, allow CLOSED for re-entry)
+        in_portfolio = any(t["ticker"] == ticker for t in portfolio_trades)
+        if in_portfolio:
+            continue
+        
         if not LIVE_MODE:
             print(f"SETUP FOUND  |  score {score['total']:.1f}/100  "
                   f"range {coil['range_pct']:.1f}%  "
@@ -714,12 +1166,12 @@ def run_screener() -> None:
         signal_date = df.index[-1].strftime("%d-%m-%Y") if hasattr(df.index[-1], "strftime") else str(df.index[-1])
         
         # Track setup in portfolio
-        add_to_portfolio(ticker, name, "long_breakout", setup["entry"], setup["stop_loss"], setup["target"])
+        add_to_portfolio(ticker, name, "long_breakout", setup["entry"], setup["stop_loss"], setup["target"], score['total'])
 
         final_setups.append({
             "name":   name,
             "ticker": ticker,
-            "strategy": "breakout",
+            "strategy": "long_breakout",
             "signal_date": signal_date,
             "trend":  trend,
             "cons":   coil,
@@ -745,6 +1197,7 @@ def run_screener() -> None:
         print(f"  Passed Stage 2  (Coil)        : {coil_passed}")
         print(f"  Passed Stage 3a (Risk)        : {risk_passed}")
         print(f"  Passed Stage 3b (Volume)      : {vol_passed}")
+        print(f"  Passed Stage 3c (Candle)     : {candle_passed}")
         print(f"  Skipped Stage 3d (Earnings)   : {earnings_skipped}")
         print(f"  Passed all stages             : {len(final_setups)}")
 
@@ -772,7 +1225,7 @@ def run_screener() -> None:
 
         if not LIVE_MODE:
             print(f"  * {len(final_setups)} setup(s) ranked  |  "
-                  f"Score = Risk(40) + Range(35) + Trend(25)")
+                  f"Score = Risk({SCORE_WEIGHT_RISK}) + Range({SCORE_WEIGHT_RANGE}) + Trend({SCORE_WEIGHT_TREND})")
     else:
         print()
         print("  No trade setups found today.")
@@ -784,6 +1237,13 @@ def run_screener() -> None:
     # ── Execution brief (always shown; full detail only in LIVE_MODE) ─────────
     print_execution_summary(final_setups, market_ok=market_ok,
                             regime_label=regime_label, width=width)
+    
+    # Send all outputs to Discord sequentially at the end
+    portfolio_trades = load_portfolio()
+    send_portfolio_to_discord(portfolio_trades, "long_breakout")
+    if final_setups:
+        send_signals_to_discord(final_setups, "long_breakout")
+    
     print()
 
 
@@ -850,9 +1310,9 @@ def print_trade_card_short(
 
     # Score breakdown
     print(f"  {'Overall Score':<22}  {_score_bar(score['total'])}")
-    print(f"  {'  Risk score':<22}  {score['risk_score']:>5.1f} / 40"
+    print(f"  {'  Risk score':<22}  {score['risk_score']:>5.1f} / {SCORE_WEIGHT_RISK}"
           f"   (lower risk % is better)")
-    print(f"  {'  Range score':<22}  {score['range_score']:>5.1f} / 35"
+    print(f"  {'  Range score':<22}  {score['range_score']:>5.1f} / {SCORE_WEIGHT_RANGE}"
           f"   (tighter coil is better)")
     g = score["ema50_gap_pct"]
     if g < 1.0:
@@ -863,7 +1323,7 @@ def print_trade_card_short(
         zone = "mild extension (4–6%)"
     else:
         zone = "overextended (>6%)"
-    print(f"  {'  Trend score':<22}  {score['trend_score']:>5.1f} / 25"
+    print(f"  {'  Trend score':<22}  {score['trend_score']:>5.1f} / {SCORE_WEIGHT_TREND}"
           f"   {g:+.2f}% below EMA50  [{zone}]")
     print()
 
@@ -949,12 +1409,12 @@ def print_execution_summary_short(
     print("=" * width)
 
     _reg_display = {
-        "STRONG_BEAR": ("✅", "STRONG BEAR — full short capacity"),
-        "EARLY_BEAR":  ("⚡", "EARLY BEAR — reduced short capacity"),
-        "BULL":        ("🚫", "BULL — no short trades today"),
-        "UNKNOWN":     ("❓", "unknown — proceeding with caution"),
+        "STRONG_BEAR": ("✅", "STRONG BEAR — full capacity"),
+        "EARLY_BEAR": ("⚡", "EARLY BEAR — reduced capacity"),
+        "BULL":        ("🚫", "BULL — no shorts today"),
+        "UNKNOWN":     ("⚪", "REGIME OFF — all conditions allowed"),
     }
-    r_icon, r_text = _reg_display.get(regime_label, ("❓", regime_label))
+    r_icon, r_text = _reg_display.get(regime_label, ("⚪", "REGIME OFF"))
     print(f"  Market regime      {r_icon}  {r_text}")
     min_cr = MIN_AVG_TURNOVER // 1_00_00_000
     print(f"  Liquidity filter   ✅  active (min Rs.{min_cr} Cr avg daily turnover)")
@@ -1003,9 +1463,9 @@ def run_screener_short() -> None:
     """Execute the full SHORT breakdown scan and print results."""
     width   = 72
     total   = len(STOCKS)
-    today   = datetime.today()
+    today   = get_now()
     scanned = skipped = earnings_skipped = 0
-    ema_passed = coil_passed = risk_passed = vol_passed = 0
+    ema_passed = coil_passed = risk_passed = vol_passed = candle_passed = 0
     final_setups: list[dict] = []
 
     # ── Header ────────────────────────────────────────────────────────────────
@@ -1013,7 +1473,7 @@ def run_screener_short() -> None:
     print(f"{'SHORT BREAKDOWN SCREENER  -  INDIAN STOCKS (NSE)':^{width}}")
     if LIVE_MODE:
         print(f"{'[LIVE MODE — clean output]':^{width}}")
-    print(f"{'Stage 0 : Market Regime  (Nifty 50 < EMA50 — bearish)':^{width}}")
+    print(f"{'Stage 0 : Market Regime filter disabled':^{width}}")
     print(f"{'Stage 1 : Close < EMA50 < EMA200  (downtrend)':^{width}}")
     print(f"{'Stage 2 : Coil  (range < ' + str(MAX_RANGE_PCT) + '%, near low < ' + str(NEAR_HIGH_PCT) + '%)':^{width}}")
     gap_pct_str = f"{int((GAP_UP_THRESHOLD - 1) * 100)}%"
@@ -1024,69 +1484,27 @@ def run_screener_short() -> None:
     print("=" * width)
 
     # ── Update tracked trades first ───────────────────────────────────────────
-    update_portfolio()
+    update_portfolio("short_breakout")
+    
+    # Load portfolio AFTER update to get fresh data for duplicate check
+    portfolio_trades = load_portfolio()
+    portfolio_tickers = {t["ticker"] for t in portfolio_trades}
 
-    # ── Stage 0 : Market regime ──────────────────────────────────────────────────
-
-    print(f"\n  Checking market regime ({NIFTY_TICKER}) ...", end="  ", flush=True)
-    regime = check_market_regime_bearish()
-    print("done.\n")
-
-    print("=" * width)
-    print(f"{'MARKET REGIME  —  NIFTY 50  [SHORT]':^{width}}")
-    print("=" * width)
-
-    if regime["error"]:
-        print(f"  WARNING: {regime['error']}")
-        print("  Proceeding without market filter (data unavailable).")
-        market_ok    = True
-        regime_label = "UNKNOWN"
-    else:
-        _regime_map = {
-            "STRONG_BEAR": ("✅", "STRONG BEAR — shorts allowed"),
-            "EARLY_BEAR":  ("⚡", "EARLY BEAR  (EMA20 declining, reduced conviction)"),
-            "BULL":        ("🚫", "BULL — no shorts"),
-        }
-        r_icon, r_text = _regime_map.get(regime["regime"], ("❓", regime["regime"]))
-
-        assert regime["close"] is not None
-        assert regime["ema20"] is not None
-        assert regime["ema50"] is not None
-        gap50      = round(float((regime["close"] - regime["ema50"]) / regime["ema50"] * 100), 2)
-        gap50_sign = "+" if gap50 >= 0 else ""
-        gap20      = round(float((regime["close"] - regime["ema20"]) / regime["ema20"] * 100), 2)
-        gap20_sign = "+" if gap20 >= 0 else ""
-
-        print(f"  {'Nifty Close':<22}  {regime['close']:>10,.2f}")
-        print(f"  {'Nifty EMA 20':<22}  {regime['ema20']:>10,.2f}"
-              f"   ({gap20_sign}{gap20:.2f}%)")
-        print(f"  {'Nifty EMA 50':<22}  {regime['ema50']:>10,.2f}"
-              f"   ({gap50_sign}{gap50:.2f}%)")
-        print(f"  {'Market Status':<22}  {r_icon}  {r_text}")
-        market_ok    = regime["is_bullish"]   # True = bearish-tradeable
-        regime_label = regime["regime"]
-
-    print("=" * width)
-
-    if not market_ok:
-        print()
-        print("  Market is NOT bearish enough — Nifty is above EMA50 or breadth "
-              "is too strong.")
-        print("  No short trades allowed in a BULL regime.")
-        print("  Re-run when Nifty shows bearish breakdown (close < EMA50).")
-        print()
-        if LIVE_MODE:
-            print_execution_summary_short([], market_ok=False,
-                                          regime_label="BULL", width=width)
-        return
-
-    print()
+    # ── Stage 0 : Market regime filter intentionally disabled ──────────────────
+    market_ok = True
+    regime_label = "UNKNOWN"
+    print("\n  Market regime filter disabled — skipping Nifty EMA gate.\n")
 
     if LIVE_MODE:
         print(f"  Scanning {total} stocks ...", flush=True)
 
     # ── Scan loop ─────────────────────────────────────────────────────────────
     for ticker, name in STOCKS.items():
+        # Skip if already in portfolio (any status) - prevents duplicate signals
+        if ticker in portfolio_tickers:
+            skipped += 1
+            continue
+        
         n = scanned + skipped + 1
 
         if not LIVE_MODE:
@@ -1163,7 +1581,16 @@ def run_screener_short() -> None:
 
         vol_passed += 1
 
-        # Stage 3c — gap-down guard
+        # Stage 3c — candle strength (DISABLED Apr 2022 - hurt performance)
+        # from strategies.short_breakout import check_candle_strength_short
+        # candle = check_candle_strength_short(df)
+        # if candle is None:
+        #     if not LIVE_MODE:
+        #         print("trend+coil+risk+vol ok | weak candle  -> filtered")
+        #     continue
+        # candle_passed += 1
+
+        # Stage 3d — gap-down guard
         gap = check_gap_down(df, setup["entry"])
         if gap["is_gap_down"]:
             if not LIVE_MODE:
@@ -1171,7 +1598,7 @@ def run_screener_short() -> None:
                       f"  gapped {gap['gap_pct']:.2f}% below entry  -> invalid (gap-down)")
             continue
 
-        # Stage 3d — earnings blackout
+        # Stage 3e — earnings blackout
         e_dates = get_earnings_dates(ticker)
         if is_near_earnings(e_dates, today):
             earnings_skipped += 1
@@ -1181,6 +1608,11 @@ def run_screener_short() -> None:
 
         score = score_short_breakout(trend, coil)
 
+        # Check if already in portfolio (skip PENDING/ACTIVE, allow CLOSED for re-entry)
+        in_portfolio = any(t["ticker"] == ticker for t in portfolio_trades)
+        if in_portfolio:
+            continue
+        
         if not LIVE_MODE:
             print(f"SHORT SETUP  |  score {score['total']:.1f}/100  "
                   f"range {coil['range_pct']:.1f}%  "
@@ -1191,7 +1623,7 @@ def run_screener_short() -> None:
         signal_date = df.index[-1].strftime("%d-%m-%Y") if hasattr(df.index[-1], "strftime") else str(df.index[-1])
 
         # Track setup in portfolio
-        add_to_portfolio(ticker, name, "short_breakout", setup["entry"], setup["stop_loss"], setup["target"])
+        add_to_portfolio(ticker, name, "short_breakout", setup["entry"], setup["stop_loss"], setup["target"], score['total'])
 
         final_setups.append({
             "name":   name,
@@ -1222,6 +1654,7 @@ def run_screener_short() -> None:
         print(f"  Passed Stage 2  (Coil near low)  : {coil_passed}")
         print(f"  Passed Stage 3a (Risk)           : {risk_passed}")
         print(f"  Passed Stage 3b (Volume)         : {vol_passed}")
+        print(f"  Passed Stage 3c (Candle)         : {candle_passed}")
         print(f"  Skipped Stage 3d (Earnings)      : {earnings_skipped}")
         print(f"  Passed all stages                : {len(final_setups)}")
 
@@ -1249,7 +1682,7 @@ def run_screener_short() -> None:
 
         if not LIVE_MODE:
             print(f"  * {len(final_setups)} short setup(s) ranked  |  "
-                  f"Score = Risk(40) + Range(35) + Trend(25)")
+                  f"Score = Risk({SCORE_WEIGHT_RISK}) + Range({SCORE_WEIGHT_RANGE}) + Trend({SCORE_WEIGHT_TREND})")
     else:
         print()
         print("  No short trade setups found today.")
@@ -1260,6 +1693,13 @@ def run_screener_short() -> None:
 
     print_execution_summary_short(final_setups, market_ok=market_ok,
                                   regime_label=regime_label, width=width)
+    
+    # Send all outputs to Discord sequentially at the end
+    portfolio_trades = load_portfolio()
+    send_portfolio_to_discord(portfolio_trades, "short_breakout")
+    if final_setups:
+        send_signals_to_discord(final_setups, "short_breakout")
+    
     print()
 
 

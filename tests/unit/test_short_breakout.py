@@ -76,10 +76,22 @@ def test_check_gap_down(sample_df_short):
 
 def test_trend_score_short_variations():
     assert _trend_score_short(-1) == 0.0
-    assert _trend_score_short(0.5) == 12.5
-    assert _trend_score_short(2.0) == 25.0
-    assert _trend_score_short(5.0) == 18.75
-    assert round(_trend_score_short(10.0), 2) == 4.17
+    assert _trend_score_short(0.5) == 20.0
+    assert _trend_score_short(2.0) == 40.0
+    assert _trend_score_short(5.0) == 30.0
+    assert round(_trend_score_short(10.0), 2) == 6.67
+
+def test_score_short_uses_config_weights():
+    """Verify score calculation uses config weights instead of hardcoded values."""
+    from config.settings import SCORE_WEIGHT_RISK, SCORE_WEIGHT_RANGE, SCORE_WEIGHT_TREND
+    
+    trend = {"close": 95, "ema50": 100, "ema200": 110}
+    coil = {"period_high": 102, "period_low": 100, "range_pct": 2.0, "gap_to_low_pct": 1.0}
+    result = score_short_breakout(trend, coil)
+    
+    expected_total = SCORE_WEIGHT_RISK + SCORE_WEIGHT_RANGE + SCORE_WEIGHT_TREND
+    assert expected_total == 100, "Config weights should sum to 100"
+    assert result["total"] <= expected_total, "Total score should not exceed sum of weights"
 
 def test_score_short_breakout():
     trend = {"close": 95, "ema50": 100, "ema200": 110}

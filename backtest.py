@@ -10,7 +10,7 @@ Pipeline (each day)
   Stage 1  Trend          : stock close > EMA50 > EMA200
   Stage 2  Coil           : range < MAX_RANGE_PCT, close near high
   Stage 3  Volume         : surge ratio >= VOLUME_MIN_RATIO
-  Scoring                 : Risk(40) + Range(35) + Trend(25)
+  Scoring                 : Risk(30) + Range(30) + Trend(40)
 
 Trade mechanics
 ---------------
@@ -43,9 +43,17 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
 # ── Shared imports ────────────────────────────────────────────────────────────
-from datetime import datetime
+from datetime import datetime, timedelta
+import pytz
+
+try:
+    from reports.backtest.version import save_backtest_result
+    BACKTEST_VERSIONING = True
+except ImportError:
+    BACKTEST_VERSIONING = False
 
 from config.settings import (
+    ATR_PERIOD,
     BACKTEST_DAYS,
     BACKTEST_FETCH_DAYS,
     COIL_CANDLES,
@@ -64,8 +72,12 @@ from config.settings import (
     RISK_PER_TRADE,
     SLIPPAGE_PCT,
     STARTING_EQUITY,
+    TRAILING_ATR_MULTIPLIER,
+    USE_ATR_TRAILING,
     VOLUME_AVG_PERIOD,
     WALK_FORWARD_SPLIT_YEAR,
+    DISCORD_PORTFOLIO_WEBHOOK,
+    TIMEZONE,
 )
 from config.stocks import SECTORS, STOCKS
 from data.cache import fetch_ohlcv
@@ -77,8 +89,10 @@ from strategies.long_breakout import (
     check_liquidity,
     check_trend,
     check_volume,
+    check_candle_strength,
     get_market_regime,
     score_long_breakout,
+    calculate_atr,
 )
 from strategies.short_breakout import (
     check_consolidation_short,
@@ -86,6 +100,18 @@ from strategies.short_breakout import (
     get_market_regime_short,
     score_short_breakout,
 )
+
+# ── Timezone Helper ───────────────────────────────────────────────────────────
+
+def get_now() -> datetime:
+    """Return current time in the configured timezone."""
+    ist = pytz.timezone(TIMEZONE)
+    return datetime.now(ist)
+
+def get_today_str() -> str:
+    """Return today's date string in DD-MM-YYYY format in the configured timezone."""
+    return get_now().strftime("%d-%m-%Y")
+
 
 # ── Type definitions ─────────────────────────────────────────────────────────
 
@@ -167,12 +193,12 @@ def fetch_ticker(
     return fetch_ohlcv(ticker, days, refresh=refresh)
 
 
-def fetch_all(tickers: list[str]) -> dict[str, pd.DataFrame]:
+def fetch_all(tickers: list[str], refresh: bool = True) -> dict[str, pd.DataFrame]:
     """Fetch all tickers, print bar counts, skip failures."""
     data = {}
     for t in tickers:
         print(f"  Fetching {t:<20} ...", end=" ", flush=True)
-        df = fetch_ticker(t)
+        df = fetch_ticker(t, refresh=refresh)
         if df is None:
             print("FAILED — skipped")
         else:
@@ -224,6 +250,11 @@ def scan_candidates(
         vol = check_volume(df, idx)
         if vol is None:
             continue
+
+        # Candle strength filter (DISABLED Apr 2022 - hurt performance)
+        # candle = check_candle_strength(df, idx)
+        # if candle is None:
+        #     continue
 
         entry = coil["period_high"]
         stop_loss = coil["period_low"]
@@ -341,11 +372,13 @@ def run_backtest(
       • Size each trade so that a full stop-loss costs RISK_PER_TRADE % equity.
       • Open up to MAX_CONCURRENT_TRADES simultaneous positions.
 
-    Returns (closed_trades, final_equity).
+    Returns (closed_trades, final_equity, max_drawdown).
     """
     all_dates = nifty_df.index
     start_idx = max(EMA_LONG + 10, len(all_dates) - BACKTEST_DAYS)
     equity = float(STARTING_EQUITY)
+    peak_equity = equity
+    max_drawdown = 0.0
 
     active_trades: list[Trade] = []
     closed_trades: list[Trade] = []
@@ -399,28 +432,61 @@ def run_backtest(
             if low_bar <= trade["active_sl"]:
                 outcome = "breakeven" if trade["be_hit"] else "loss"
                 equity += _close(trade, trade["active_sl"], outcome, i, closed_trades, date.strftime("%d-%m-%Y"))
+                peak_equity = max(peak_equity, equity)
+                drawdown = (peak_equity - equity) / peak_equity if peak_equity > 0 else 0.0
+                max_drawdown = max(max_drawdown, drawdown)
 
             elif high_bar >= target:
                 equity += _close(trade, target, "win", i, closed_trades, date.strftime("%d-%m-%Y"))
+                peak_equity = max(peak_equity, equity)
+                drawdown = (peak_equity - equity) / peak_equity if peak_equity > 0 else 0.0
+                max_drawdown = max(max_drawdown, drawdown)
 
             elif is_entry_bar:
                 # Entry bar: SL and target already checked; skip TRL
                 still_open.append(trade)
 
             else:
-                ema20 = None
-                if "EMA20" in df.columns:
-                    val = df["EMA20"].iloc[bar]
-                    if not pd.isna(val):
-                        ema20 = float(val)
+                # Trailing exit check
+                trailing_triggered = False
+                exit_price = None
+                exit_date_str = None
 
-                if ema20 is not None and close_bar < ema20:
-                    if bar + 1 < len(df):
-                        exit_price = float(df["Open"].iloc[bar + 1])
-                        exit_date_str = df.index[bar + 1].strftime("%d-%m-%Y")
-                    else:
-                        exit_price = float(df["Close"].iloc[bar])
-                        exit_date_str = df.index[bar].strftime("%d-%m-%Y")
+                if USE_ATR_TRAILING and "ATR" in df.columns:
+                    # ATR-based trailing: exit if close < (highest_high_since_entry - multiplier × ATR)
+                    atr_val = df["ATR"].iloc[bar]
+                    if not pd.isna(atr_val):
+                        # Get highest high since entry
+                        entry_bar = trade.get("entry_bar", bar)
+                        highest_since_entry = float(df["High"].iloc[entry_bar:bar + 1].max())
+                        trailing_stop = highest_since_entry - (TRAILING_ATR_MULTIPLIER * atr_val)
+                        
+                        if close_bar < trailing_stop:
+                            trailing_triggered = True
+                            if bar + 1 < len(df):
+                                exit_price = float(df["Open"].iloc[bar + 1])
+                                exit_date_str = df.index[bar + 1].strftime("%d-%m-%Y")
+                            else:
+                                exit_price = float(df["Close"].iloc[bar])
+                                exit_date_str = df.index[bar].strftime("%d-%m-%Y")
+                else:
+                    # EMA-based trailing (default): exit if close < EMA20
+                    ema20 = None
+                    if "EMA20" in df.columns:
+                        val = df["EMA20"].iloc[bar]
+                        if not pd.isna(val):
+                            ema20 = float(val)
+
+                    if ema20 is not None and close_bar < ema20:
+                        trailing_triggered = True
+                        if bar + 1 < len(df):
+                            exit_price = float(df["Open"].iloc[bar + 1])
+                            exit_date_str = df.index[bar + 1].strftime("%d-%m-%Y")
+                        else:
+                            exit_price = float(df["Close"].iloc[bar])
+                            exit_date_str = df.index[bar].strftime("%d-%m-%Y")
+
+                if trailing_triggered and exit_price is not None:
                     equity += _close(trade, exit_price, "trail", i, closed_trades, exit_date_str)
                 else:
                     still_open.append(trade)
@@ -431,14 +497,11 @@ def run_backtest(
         if i >= len(all_dates) - 1:
             continue
 
-        regime_ok, regime_label, _breadth = get_market_regime(nifty_df, i, stock_data)
-        if not regime_ok:
-            continue
+        # Market regime filter intentionally disabled
+        regime_ok = True
+        regime_label = "DISABLED"
 
-        # In EARLY_TREND regime apply optional trade-capacity reduction
         effective_max = MAX_CONCURRENT_TRADES
-        if regime_label == "EARLY_TREND" and EARLY_TREND_MAX_TRADES_FACTOR < 1.0:
-            effective_max = max(1, round(float(MAX_CONCURRENT_TRADES * EARLY_TREND_MAX_TRADES_FACTOR)))
 
         if len(active_trades) >= effective_max:
             continue
@@ -517,6 +580,7 @@ def run_backtest(
                 "qty": qty,
                 "score": cand["score"],
                 "volume_ratio": cand["volume_ratio"],
+                "entry_bar": next_bar,  # store for ATR trailing
             }
             active_trades.append(new_trade)
             active_tickers.add(cand["ticker"])
@@ -540,7 +604,11 @@ def run_backtest(
         exit_price = float(df["Close"].iloc[last_bar])
         equity += _close(trade, exit_price, "trail", last_i, closed_trades, df.index[last_bar].strftime("%d-%m-%Y"))
 
-    return closed_trades, equity
+    peak_equity = max(peak_equity, equity)
+    drawdown = (peak_equity - equity) / peak_equity if peak_equity > 0 else 0.0
+    max_drawdown = max(max_drawdown, drawdown)
+
+    return closed_trades, equity, max_drawdown
 
 
 # ── Analysis helpers ──────────────────────────────────────────────────────────
@@ -700,7 +768,7 @@ def print_walkforward_summary(trades: list[Trade], width: int = 62) -> None:
 # ── Summary printer ───────────────────────────────────────────────────────────
 
 
-def print_summary(trades: list[Trade], final_equity: float) -> None:
+def print_summary(trades: list[Trade], final_equity: float, max_drawdown: float = 0.0) -> None:
     """Print trade statistics, equity summary, and all robustness sections."""
     width = 62
     total = len(trades)
@@ -774,6 +842,7 @@ def print_summary(trades: list[Trade], final_equity: float) -> None:
     print(f"  {'Final equity':<30}  Rs. {final_equity:>10,.0f}")
     sign = "+" if net_pct >= 0 else ""
     print(f"  {'Net P&L  (after costs)':<30}  Rs. {net_abs:>+10,.0f}  ({sign}{net_pct}%)")
+    print(f"  {'Max drawdown':<30}  {max_drawdown*100:.2f}%")
     print(f"  {'Total costs paid':<30}  Rs. {total_cost:>10,.0f}")
     print("=" * width)
 
@@ -786,22 +855,72 @@ def print_summary(trades: list[Trade], final_equity: float) -> None:
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
+def send_backtest_to_discord(strategy: str, trades: list[Trade], final_equity: float, max_drawdown: float) -> None:
+    """Send backtest summary to Discord if webhook is configured."""
+    if not DISCORD_PORTFOLIO_WEBHOOK:
+        return
+        
+    total = len(trades)
+    if total == 0:
+        return
+        
+    wins = sum(1 for t in trades if t["outcome"] == "win")
+    losses = sum(1 for t in trades if t["outcome"] == "loss")
+    win_rate = round(float(wins / total * 100), 1) if total else 0.0
+    
+    net_pct = round(float((final_equity - STARTING_EQUITY) / STARTING_EQUITY * 100), 2)
+    net_abs = round(float(final_equity - STARTING_EQUITY), 2)
+    
+    avg_win = round(float(sum(t["pnl_pct"] for t in trades if t["outcome"] == "win") / wins), 2) if wins else 0.0
+    avg_loss = round(float(sum(t["pnl_pct"] for t in trades if t["outcome"] == "loss") / losses), 2) if losses else 0.0
+    avg_rr = round(float(avg_win / avg_loss), 2) if avg_loss != 0 else 0.0
+    
+    date_str = get_now().strftime("%d %b %Y, %H:%M")
+    direction = "LONG" if strategy == "long_breakout" else "SHORT"
+    emoji = "🟢" if direction == "LONG" else "🔴"
+    
+    lines = []
+    lines.append(f"{emoji} **BACKTEST SUMMARY ({direction})**")
+    lines.append(f"*{date_str}*")
+    lines.append("")
+    lines.append(f"**Metrics**")
+    lines.append(f"• Total Trades: **{total}** (W:{wins} | L:{losses})")
+    lines.append(f"• Win Rate: **{win_rate}%**")
+    lines.append(f"• Net P&L: **{'+' if net_pct >= 0 else ''}{net_pct}%** (₹{net_abs:,.0f})")
+    lines.append(f"• Max Drawdown: **{max_drawdown*100:.2f}%**")
+    lines.append(f"• Realized R:R: **1:{avg_rr}**")
+    lines.append("")
+    lines.append(f"*Note: Detailed trade logs exported to CSV.*")
+    
+    message = "\n".join(lines)
+    
+    try:
+        import requests
+        resp = requests.post(DISCORD_PORTFOLIO_WEBHOOK, json={"content": message}, timeout=10)
+        if resp.status_code == 204:
+            print("  [+] Backtest summary posted to Discord")
+        else:
+            print(f"  [!] Failed to post to Discord (HTTP {resp.status_code})")
+    except Exception as e:
+        print(f"  [!] Discord error: {e}")
 
-def run_backtest_strategy(export: bool = False) -> None:
+
+
+def run_backtest_strategy(export: bool = False, refresh: bool = True) -> None:
     """Run the full breakout backtest pipeline."""
     width = 62
     print("=" * width)
     print(f"{'SWING TRADING BACKTEST  —  FULL STRATEGY':^{width}}")
     print(f"{'Universe : ' + str(len(STOCKS)) + ' stocks':^{width}}")
     print(
-        f"{f'Coil {COIL_CANDLES}c  Range<{int(MAX_RANGE_PCT)}%  NearHi<{int(NEAR_HIGH_PCT)}%  RR 1:{int(REWARD_RATIO)}':^{width}}"
+        f"{f'Coil {COIL_CANDLES}c  Range<{int(MAX_RANGE_PCT)}%  NearHigh<{int(NEAR_HIGH_PCT)}%  RR 1:{int(REWARD_RATIO)}':^{width}}"
     )
-    print(f"{'Run date : ' + datetime.today().strftime('%d-%m-%Y'):^{width}}")
+    print(f"{'Run date : ' + get_today_str():^{width}}")
     print("=" * width)
 
     print("\n  Fetching data ...\n")
     all_tickers = [NIFTY_TICKER] + list(STOCKS.keys())
-    raw = fetch_all(all_tickers)
+    raw = fetch_all(all_tickers, refresh=refresh)
 
     if NIFTY_TICKER not in raw:
         print("\n  ERROR: Could not fetch Nifty data. Aborting.")
@@ -820,7 +939,7 @@ def run_backtest_strategy(export: bool = False) -> None:
     print(f"{'TRADE LOG':^{width}}")
     print("─" * width)
 
-    trades, final_equity = run_backtest(nifty_df, stock_data)
+    trades, final_equity, max_drawdown = run_backtest(nifty_df, stock_data)
 
     if not trades:
         print("\n  No trades were generated in the backtest period.")
@@ -831,7 +950,37 @@ def run_backtest_strategy(export: bool = False) -> None:
         print()
         return
 
-    print_summary(trades, final_equity)
+    print_summary(trades, final_equity, max_drawdown)
+
+    # Save to backtest history
+    if BACKTEST_VERSIONING:
+        total = len(trades)
+        wins = sum(1 for t in trades if t["outcome"] == "win")
+        losses = sum(1 for t in trades if t["outcome"] == "loss")
+        win_rate = round(float(wins / total * 100), 1) if total else 0.0
+        
+        win_amounts = [abs(t["pnl_pct"]) for t in trades if t["outcome"] == "win"]
+        loss_amounts = [abs(t["pnl_pct"]) for t in trades if t["outcome"] == "loss"]
+        avg_win = sum(win_amounts) / len(win_amounts) if win_amounts else 0.0
+        avg_loss = sum(loss_amounts) / len(loss_amounts) if loss_amounts else 0.0
+        avg_rr = round(avg_win / avg_loss, 2) if avg_loss > 0 else 0.0
+        
+        avg_hold = round(float(sum(t["bars_held"] for t in trades) / total), 1) if total else 0.0
+        net_pct = round(float((final_equity - STARTING_EQUITY) / STARTING_EQUITY * 100), 2)
+        
+        save_backtest_result(
+            strategy="long_breakout",
+            total_trades=total,
+            win_rate=win_rate,
+            net_pct=net_pct,
+            final_equity=final_equity,
+            avg_rr=avg_rr,
+            max_drawdown=max_drawdown,
+            avg_hold=avg_hold,
+            notes=f"Config: COIL={COIL_CANDLES}, RANGE={MAX_RANGE_PCT}%, RR={REWARD_RATIO}",
+        )
+        send_backtest_to_discord("long_breakout", trades, final_equity, max_drawdown)
+        print(f"\n  [+] Saved to backtest history\n")
 
     if export:
         df_trades = pd.DataFrame(trades)
@@ -883,6 +1032,12 @@ def scan_candidates_short(
         vol = check_volume(df, idx)
         if vol is None:
             continue
+
+        # Candle strength filter for short (DISABLED Apr 2022 - hurt performance)
+        # from strategies.short_breakout import check_candle_strength_short
+        # candle = check_candle_strength_short(df, idx)
+        # if candle is None:
+        #     continue
 
         # Short: entry = period_low, SL = period_high
         entry = coil["period_low"]
@@ -994,11 +1149,13 @@ def run_backtest_short(
           next bar must have Low <= entry AND Close <= entry.
       • Size each trade so that a full stop-loss costs RISK_PER_TRADE % equity.
 
-    Returns (closed_trades, final_equity).
+    Returns (closed_trades, final_equity, max_drawdown).
     """
     all_dates = nifty_df.index
     start_idx = max(EMA_LONG + 10, len(all_dates) - BACKTEST_DAYS)
     equity = float(STARTING_EQUITY)
+    peak_equity = equity
+    max_drawdown = 0.0
 
     active_trades: list[Trade] = []
     closed_trades: list[Trade] = []
@@ -1052,31 +1209,66 @@ def run_backtest_short(
             if high_bar >= trade["active_sl"]:
                 outcome = "breakeven" if trade["be_hit"] else "loss"
                 equity += _close_short(trade, trade["active_sl"], outcome, i, closed_trades, date.strftime("%d-%m-%Y"))
+                peak_equity = max(peak_equity, equity)
+                drawdown = (peak_equity - equity) / peak_equity if peak_equity > 0 else 0.0
+                max_drawdown = max(max_drawdown, drawdown)
 
             # Target hit: price goes DOWN to target (short wins when price falls)
             elif low_bar <= target:
                 equity += _close_short(trade, target, "win", i, closed_trades, date.strftime("%d-%m-%Y"))
+                peak_equity = max(peak_equity, equity)
+                drawdown = (peak_equity - equity) / peak_equity if peak_equity > 0 else 0.0
+                max_drawdown = max(max_drawdown, drawdown)
 
             elif is_entry_bar:
                 # Entry bar: SL and target already checked; skip TRL
                 still_open.append(trade)
 
             else:
-                # Trailing exit: Close > EMA20 → exit
-                ema20 = None
-                if "EMA20" in df.columns:
-                    val = df["EMA20"].iloc[bar]
-                    if not pd.isna(val):
-                        ema20 = float(val)
+                # Trailing exit check
+                trailing_triggered = False
+                exit_price = None
+                exit_date_str = None
 
-                if ema20 is not None and close_bar > ema20:
-                    if bar + 1 < len(df):
-                        exit_price = float(df["Open"].iloc[bar + 1])
-                        exit_date_str = df.index[bar + 1].strftime("%d-%m-%Y")
-                    else:
-                        exit_price = float(df["Close"].iloc[bar])
-                        exit_date_str = df.index[bar].strftime("%d-%m-%Y")
+                if USE_ATR_TRAILING and "ATR" in df.columns:
+                    # ATR-based trailing for shorts: exit if close > (lowest_low_since_entry + multiplier × ATR)
+                    atr_val = df["ATR"].iloc[bar]
+                    if not pd.isna(atr_val):
+                        # Get lowest low since entry
+                        entry_bar = trade.get("entry_bar", bar)
+                        lowest_since_entry = float(df["Low"].iloc[entry_bar:bar + 1].min())
+                        trailing_stop = lowest_since_entry + (TRAILING_ATR_MULTIPLIER * atr_val)
+                        
+                        if close_bar > trailing_stop:
+                            trailing_triggered = True
+                            if bar + 1 < len(df):
+                                exit_price = float(df["Open"].iloc[bar + 1])
+                                exit_date_str = df.index[bar + 1].strftime("%d-%m-%Y")
+                            else:
+                                exit_price = float(df["Close"].iloc[bar])
+                                exit_date_str = df.index[bar].strftime("%d-%m-%Y")
+                else:
+                    # EMA-based trailing (default): exit if close > EMA20
+                    ema20 = None
+                    if "EMA20" in df.columns:
+                        val = df["EMA20"].iloc[bar]
+                        if not pd.isna(val):
+                            ema20 = float(val)
+
+                    if ema20 is not None and close_bar > ema20:
+                        trailing_triggered = True
+                        if bar + 1 < len(df):
+                            exit_price = float(df["Open"].iloc[bar + 1])
+                            exit_date_str = df.index[bar + 1].strftime("%d-%m-%Y")
+                        else:
+                            exit_price = float(df["Close"].iloc[bar])
+                            exit_date_str = df.index[bar].strftime("%d-%m-%Y")
+
+                if trailing_triggered and exit_price is not None:
                     equity += _close_short(trade, exit_price, "trail", i, closed_trades, exit_date_str)
+                    peak_equity = max(peak_equity, equity)
+                    drawdown = (peak_equity - equity) / peak_equity if peak_equity > 0 else 0.0
+                    max_drawdown = max(max_drawdown, drawdown)
                 else:
                     still_open.append(trade)
 
@@ -1086,13 +1278,11 @@ def run_backtest_short(
         if i >= len(all_dates) - 1:
             continue
 
-        regime_ok, regime_label, _breadth = get_market_regime_short(nifty_df, i, stock_data)
-        if not regime_ok:
-            continue
+        # Market regime filter intentionally disabled
+        regime_ok = True
+        regime_label = "DISABLED"
 
         effective_max = MAX_CONCURRENT_TRADES
-        if regime_label == "EARLY_BEAR" and EARLY_TREND_MAX_TRADES_FACTOR < 1.0:
-            effective_max = max(1, round(float(MAX_CONCURRENT_TRADES * EARLY_TREND_MAX_TRADES_FACTOR)))
 
         if len(active_trades) >= effective_max:
             continue
@@ -1167,6 +1357,7 @@ def run_backtest_short(
                 "qty": qty,
                 "score": cand["score"],
                 "volume_ratio": cand["volume_ratio"],
+                "entry_bar": next_bar,  # store for ATR trailing
             }
             active_trades.append(new_trade)
             active_tickers.add(cand["ticker"])
@@ -1192,10 +1383,14 @@ def run_backtest_short(
             trade, exit_price, "trail", last_i, closed_trades, df.index[last_bar].strftime("%d-%m-%Y")
         )
 
-    return closed_trades, equity
+    peak_equity = max(peak_equity, equity)
+    drawdown = (peak_equity - equity) / peak_equity if peak_equity > 0 else 0.0
+    max_drawdown = max(max_drawdown, drawdown)
+
+    return closed_trades, equity, max_drawdown
 
 
-def print_summary_short(trades: list[Trade], final_equity: float) -> None:
+def print_summary_short(trades: list[Trade], final_equity: float, max_drawdown: float = 0.0) -> None:
     """Print trade statistics for SHORT backtest."""
     width = 62
     total = len(trades)
@@ -1265,6 +1460,7 @@ def print_summary_short(trades: list[Trade], final_equity: float) -> None:
     print(f"  {'Final equity':<30}  Rs. {final_equity:>10,.0f}")
     sign = "+" if net_pct >= 0 else ""
     print(f"  {'Net P&L  (after costs)':<30}  Rs. {net_abs:>+10,.0f}  ({sign}{net_pct}%)")
+    print(f"  {'Max drawdown':<30}  {max_drawdown*100:.2f}%")
     print(f"  {'Total costs paid':<30}  Rs. {total_cost:>10,.0f}")
     print("=" * width)
 
@@ -1274,7 +1470,7 @@ def print_summary_short(trades: list[Trade], final_equity: float) -> None:
     print()
 
 
-def run_backtest_strategy_short(export: bool = False) -> None:
+def run_backtest_strategy_short(export: bool = False, refresh: bool = True) -> None:
     """Run the full short breakdown backtest pipeline."""
     width = 62
     print("=" * width)
@@ -1283,12 +1479,12 @@ def run_backtest_strategy_short(export: bool = False) -> None:
     print(
         f"{f'Coil {COIL_CANDLES}c  Range<{int(MAX_RANGE_PCT)}%  NearLow<{int(NEAR_HIGH_PCT)}%  RR 1:{int(REWARD_RATIO)}':^{width}}"
     )
-    print(f"{'Run date : ' + datetime.today().strftime('%d-%m-%Y'):^{width}}")
+    print(f"{'Run date : ' + get_today_str():^{width}}")
     print("=" * width)
 
     print("\n  Fetching data ...\n")
     all_tickers = [NIFTY_TICKER] + list(STOCKS.keys())
-    raw = fetch_all(all_tickers)
+    raw = fetch_all(all_tickers, refresh=refresh)
 
     if NIFTY_TICKER not in raw:
         print("\n  ERROR: Could not fetch Nifty data. Aborting.")
@@ -1307,7 +1503,7 @@ def run_backtest_strategy_short(export: bool = False) -> None:
     print(f"{'SHORT TRADE LOG':^{width}}")
     print("─" * width)
 
-    trades, final_equity = run_backtest_short(nifty_df, stock_data)
+    trades, final_equity, max_drawdown = run_backtest_short(nifty_df, stock_data)
 
     if not trades:
         print("\n  No short trades were generated in the backtest period.")
@@ -1318,7 +1514,37 @@ def run_backtest_strategy_short(export: bool = False) -> None:
         print()
         return
 
-    print_summary_short(trades, final_equity)
+    print_summary_short(trades, final_equity, max_drawdown)
+
+    # Save to backtest history
+    if BACKTEST_VERSIONING:
+        total = len(trades)
+        wins = sum(1 for t in trades if t["outcome"] == "win")
+        losses = sum(1 for t in trades if t["outcome"] == "loss")
+        win_rate = round(float(wins / total * 100), 1) if total else 0.0
+        
+        win_amounts = [abs(t["pnl_pct"]) for t in trades if t["outcome"] == "win"]
+        loss_amounts = [abs(t["pnl_pct"]) for t in trades if t["outcome"] == "loss"]
+        avg_win = sum(win_amounts) / len(win_amounts) if win_amounts else 0.0
+        avg_loss = sum(loss_amounts) / len(loss_amounts) if loss_amounts else 0.0
+        avg_rr = round(avg_win / avg_loss, 2) if avg_loss > 0 else 0.0
+        
+        avg_hold = round(float(sum(t["bars_held"] for t in trades) / total), 1) if total else 0.0
+        net_pct = round(float((final_equity - STARTING_EQUITY) / STARTING_EQUITY * 100), 2)
+        
+        save_backtest_result(
+            strategy="short_breakout",
+            total_trades=total,
+            win_rate=win_rate,
+            net_pct=net_pct,
+            final_equity=final_equity,
+            avg_rr=avg_rr,
+            max_drawdown=max_drawdown,
+            avg_hold=avg_hold,
+            notes=f"Config: COIL={COIL_CANDLES}, RANGE={MAX_RANGE_PCT}%, RR={REWARD_RATIO}",
+        )
+        send_backtest_to_discord("short_breakout", trades, final_equity, max_drawdown)
+        print(f"\n  [+] Saved to backtest history\n")
 
     if export:
         df_trades = pd.DataFrame(trades)
@@ -1342,13 +1568,18 @@ def main() -> None:
         action="store_true",
         help="Export completed trades to CSV",
     )
+    parser.add_argument(
+        "--no-refresh",
+        action="store_true",
+        help="Skip refreshing data - use cached data only",
+    )
     args = parser.parse_args()
 
     # Strategy dispatch — add new strategies here as elif branches
     if args.strategy == "long_breakout":
-        run_backtest_strategy(export=args.export)
+        run_backtest_strategy(export=args.export, refresh=not args.no_refresh)
     elif args.strategy == "short_breakout":
-        run_backtest_strategy_short(export=args.export)
+        run_backtest_strategy_short(export=args.export, refresh=not args.no_refresh)
     else:
         print(f"Unknown strategy: {args.strategy}")
         raise SystemExit(1)

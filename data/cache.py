@@ -26,8 +26,10 @@ from datetime import datetime, timedelta
 import pandas as pd
 import yfinance as yf
 
-# Absolute path to this folder so imports work from any cwd
-_DIR = os.path.dirname(os.path.abspath(__file__))
+# Absolute path to a dedicated storage folder to prevent hiding python files when mounted
+_BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_DIR = os.path.join(_BASE_DIR, "storage")
+os.makedirs(_DIR, exist_ok=True)
 
 
 def _cache_path(ticker: str) -> str:
@@ -111,7 +113,13 @@ class DataCache:
         
         cache_data[key] = data
         with open(self.filepath, 'w') as f:
-            json.dump(cache_data, f)
+            # allow_nan=False will raise an error if NaN is found, 
+            # but it's better to clean the data first or use a custom encoder.
+            # For simplicity, we'll use a hack to ensure valid JSON.
+            json_str = json.dumps(cache_data, allow_nan=True)
+            # Replace literal NaN with null
+            json_str = json_str.replace(": NaN", ": null")
+            f.write(json_str)
 
     def load(self, key: str) -> dict | None:
         try:

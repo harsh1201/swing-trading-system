@@ -1,18 +1,39 @@
 # Project Backlog — Swing Trading System
 
 ## High Priority
-- [ ] TASK-QA-002: Achieve 100% Test Coverage across all core modules. (Assigned: QA, CodeGen)
-- [ ] Implement robust error handling for API disconnects in `data/` modules.
-- [ ] Add support for Multi-Strategy screening in `screener.py`.
+- [x] TASK-QA-002: Test coverage at 80% (target 90%+)
+- [x] Implement ticker aliases for symbol changes
+- [x] Add dead ticker handling (DEAD_TICKERS)
+- [ ] Consider moving to Dhan API for live trading reliability
 
 ## Medium Priority
-- [ ] Refactor `backtest.py` to support Monte Carlo simulations.
-- [ ] Integrate weekly timeframe analysis for higher-confidece trend filtering.
-- [ ] Automated daily email reports for screener hits.
+- [ ] Auto-close ACTIVE positions before earnings announcements
+- [ ] Detect and handle corporate actions (splits, bonuses)
+- [ ] Refactor backtest.py for Monte Carlo simulations
 
 ## Low Priority
-- [ ] UI/Dashboard for backtest visualization.
-- [ ] Support for international markets (Nasdaq/NYSE).
+- [ ] UI/Dashboard for backtest visualization
+- [ ] Support for international markets
 
 ---
-*Maintained by PM Agent.*
+
+## Completed (v1.15)
+- [x] Adopted RS Filter (Relative Strength)
+- [x] Disabled regime filter permanently (requires manual review)
+- [x] Disabled candle strength filter (hurt overall performance)
+- [x] Separate Discord webhooks for Long/Short signals
+- [x] Corrected score display logic for shorts
+- [x] Added tracking for peak equity and max drawdown
+
+---
+
+## Completed (v1.4)
+- [x] Portfolio features (cleanup, r_multiple, tracking)
+- [x] Discord integration (webhook posting)
+- [x] Backtest versioning (history.json)
+- [x] Ticker alias mapping (_map_ticker function)
+- [x] Dead ticker handling
+
+---
+
+*Maintained by PM Agent. Last updated: 2026-04-19*

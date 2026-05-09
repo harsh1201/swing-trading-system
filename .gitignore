@@ -1,5 +1,9 @@
-# Individual data files
-data/*.csv
+# Persistent storage and cache
+data/
+storage/
+*.csv
+*.json
+!config/stocks.json  # Keep stock list if it was json, but it's .py here
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

@@ -29,10 +29,21 @@ The screener generates **Trade Cards** for identified setups. Each card includes
 -   **Target**: The profit-taking objective (typically 2.0x risk).
 -   **Overall Score**: A metric of quality (out of 100).
 -   **Volume Surge**: How much today's volume is above the 20-day average.
+-   **R-multiple**: Current unrealized R for active positions.
 
 In `LIVE_MODE`, the screener also outputs a compact execution summary at the bottom, printed in the following pipe-separated format:
 `SYMBOL | STRATEGY | SIGNAL DATE (DD-MM-YYYY) | Entry: X | SL: Y | Target: Z`
 This makes it easy to copy-paste the day's signals directly into your brokerage or a trading journal.
+
+The screener also displays the **Current Portfolio** with all Active, Pending, and Closed trades, including:
+-   Entry trigger date
+-   Days since trigger
+-   Current R-multiple
+-   Portfolio summary (Win Rate, Avg R, Total R)
+
+### **Discord Alerts**
+The system automatically posts portfolio updates and trade signals to Discord if webhooks are configured in your `.env` file. Long and short strategies use separate webhooks for better organization.
+
 
 ---
 
@@ -50,6 +61,9 @@ python backtest.py --strategy short_breakout
 
 # Export completed trades (including entry_date and exit_date) to CSV
 python backtest.py --strategy long_breakout --export
+
+# Use cached data only (skip fresh download for speed)
+python backtest.py --strategy long_breakout --no-refresh
 ```
 
 ### **Output Reports**

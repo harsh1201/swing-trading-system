@@ -14,7 +14,7 @@ Strategy summary
   Stage 3  Volume filter  : latest volume >= VOLUME_MIN_RATIO × 20-bar avg
   Stage 3b Gap-down filter: today's open must not have gapped > GAP_UP_THRESHOLD
                             below the entry level  [screener only]
-  Scoring                 : Risk(40) + Range(35) + Trend(25)  → 0–100
+  Scoring                 : Risk(30) + Range(30) + Trend(40)  → 0–100
   Trade plan              : entry = period_low,  SL = period_high,
                             target = entry − REWARD_RATIO × risk
 """
@@ -26,16 +26,28 @@ from typing import TypedDict
 import pandas as pd
 
 from config.settings import (
+    ATR_PERIOD,
     EMA_ULTRA_SHORT,
     EMA_SHORT,
     EMA_LONG,
+    USE_ALTERNATIVE_EMA,
+    ALT_EMA_SHORT,
+    ALT_EMA_LONG,
+    REQUIRE_BOTH_EMAS,
+    USE_RS_FILTER,
+    RS_LOOKBACK,
+    RS_THRESHOLD,
     COIL_CANDLES,
     MAX_RANGE_PCT,
     NEAR_HIGH_PCT,
     REWARD_RATIO,
     MAX_RISK_PCT,
+    SCORE_WEIGHT_RISK,
+    SCORE_WEIGHT_RANGE,
+    SCORE_WEIGHT_TREND,
     VOLUME_AVG_PERIOD,
     VOLUME_MIN_RATIO,
+    MIN_CANDLE_STRENGTH,
     GAP_UP_THRESHOLD,
     MIN_AVG_VOLUME,
     MIN_AVG_TURNOVER,
@@ -48,6 +60,8 @@ from strategies.long_breakout import (
     check_volume,
     check_liquidity,
     calculate_market_breadth,
+    calculate_atr,
+    calculate_rs,
 )
 
 
@@ -70,6 +84,13 @@ class VolumeResult(TypedDict):
     latest_volume: int
     avg_volume: int
     surge_ratio: float
+
+
+class CandleStrengthResult(TypedDict):
+    strength: float
+    close: float
+    low: float
+    high: float
 
 
 class GapDownResult(TypedDict):
@@ -168,25 +189,64 @@ def is_market_bearish(nifty_df: pd.DataFrame, idx: int = -1) -> bool:
 
 # ── Stage 1: Trend (bearish) ────────────────────────────────────────────────
 
-def check_trend_short(df: pd.DataFrame, idx: int = -1) -> TrendResult | None:
+def check_trend_short(df: pd.DataFrame, idx: int = -1, benchmark_df: pd.DataFrame = None) -> TrendResult | None:
     """
     Evaluate the BEARISH trend at bar `idx` (default: latest bar).
 
-    Condition: close < EMA50 < EMA200  (stock is in a confirmed downtrend)
-
-    Returns a dict  {"close", "ema50", "ema200"}  or  None if condition fails.
+    Condition: close < EMA50 < EMA200 (default)
+    Or alternative: close < ALT_EMA_SHORT < ALT_EMA_LONG (when USE_ALTERNATIVE_EMA=True)
+    Or just: close < EMA50 (when REQUIRE_BOTH_EMAS=False)
+    
+    RS Filter (when USE_RS_FILTER=True):
+        - For shorts: RS < threshold (stock underperforming benchmark)
+    
+    Returns a dict  {"close", "ema50", "ema200", "rs"}  or  None if condition fails.
     Requires add_indicators() to have been called on df first.
     """
     row   = df.iloc[idx]
     close = float(row["Close"])
-    ema50 = float(row["EMA50"])
-    ema200= float(row["EMA200"])
-    if not (close < ema50 < ema200):
+    
+    # Determine which EMA columns to use based on config
+    if USE_ALTERNATIVE_EMA:
+        short_ema = float(row[f"EMA{ALT_EMA_SHORT}"])
+        long_ema = float(row[f"EMA{ALT_EMA_LONG}"])
+    else:
+        short_ema = float(row["EMA50"])
+        long_ema = float(row["EMA200"])
+    
+    # Check trend condition (bearish: close < ema < long_ema)
+    ema_passes = False
+    if REQUIRE_BOTH_EMAS:
+        ema_passes = close < short_ema < long_ema
+    else:
+        ema_passes = close < short_ema
+    
+    # Check RS condition for shorts (opposite: want negative RS = underperforming)
+    rs_passes = True
+    rs_value = 0.0
+    if USE_RS_FILTER:
+        # For backtest: if not enough data for RS, skip RS check (pass)
+        if len(df) >= idx + RS_LOOKBACK + 1:
+            rs_value = calculate_rs(df, benchmark_df, RS_LOOKBACK).iloc[idx]
+            if pd.isna(rs_value):
+                rs_passes = True  # Skip RS if can't calculate
+            else:
+                # For shorts: want negative RS (underperforming), so check < threshold
+                rs_passes = rs_value < RS_THRESHOLD
+        else:
+            rs_passes = True  # Skip RS if not enough data
+    
+    # Apply AND logic (both must pass)
+    if not ema_passes:
         return None
+    if USE_RS_FILTER and not rs_passes:
+        return None
+    
     return {
         "close": round(float(close),  2),
-        "ema50": round(float(ema50),  2),
-        "ema200":round(float(ema200), 2),
+        "ema50": round(float(short_ema), 2),
+        "ema200":round(float(long_ema), 2),
+        "rs": round(float(rs_value), 2) if USE_RS_FILTER else 0.0,
     }
 
 
@@ -233,6 +293,46 @@ def check_consolidation_short(df: pd.DataFrame, idx: int = -1) -> ConsolidationR
 
 # ── Stage 3b: Gap-down guard (screener only) ────────────────────────────────
 
+def check_candle_strength_short(df: pd.DataFrame, idx: int = -1) -> CandleStrengthResult | None:
+    """
+    Measure breakout candle strength using close position within the bar's range.
+
+    For SHORT breakout: close should be in bottom portion of range
+    strength = (high - close) / (high - low)
+    (inverted: higher = better for shorts = close near low)
+
+    idx = -1 → latest bar.
+
+    Returns {"strength", "close", "low", "high"} or None if strength < MIN_CANDLE_STRENGTH.
+    """
+    if idx == -1:
+        idx = len(df) - 1
+
+    if idx < 1:
+        return None
+
+    row = df.iloc[idx]
+    low = float(row["Low"])
+    high = float(row["High"])
+    close = float(row["Close"])
+
+    if high == low:
+        return None
+
+    # For shorts: higher = better (close near low = strong)
+    strength = (high - close) / (high - low)
+
+    if MIN_CANDLE_STRENGTH > 0 and strength < MIN_CANDLE_STRENGTH:
+        return None
+
+    return {
+        "strength": round(strength, 2),
+        "close": close,
+        "low": low,
+        "high": high,
+    }
+
+
 def check_gap_down(
     df: pd.DataFrame,
     entry_price: float,
@@ -261,28 +361,28 @@ def check_gap_down(
 
 def _trend_score_short(ema50_gap_pct: float) -> float:
     """
-    Piecewise score (0–25 pts) for how far close sits BELOW EMA50.
+    Piecewise score (0–SCORE_WEIGHT_TREND pts) for how far close sits BELOW EMA50.
 
     ema50_gap_pct here is the absolute gap below EMA50 (positive = further below).
 
     Zone              Gap           Score
     ──────────────────────────────────────────────────────
     Above EMA50       < 0 %         0
-    Too close         0 – 1 %       0 → 25   (linear ramp)
-    Sweet spot        1 – 4 %       25       (full marks)
-    Mild extension    4 – 6 %       25 → 12.5 (linear drop)
-    Overextended      > 6 %         12.5 → 0  (linear penalty, floor 0)
+    Too close         0 – 1 %       0 → SCORE_WEIGHT_TREND   (linear ramp)
+    Sweet spot        1 – 4 %       SCORE_WEIGHT_TREND       (full marks)
+    Mild extension    4 – 6 %       SCORE_WEIGHT_TREND → SCORE_WEIGHT_TREND/2 (linear drop)
+    Overextended      > 6 %         SCORE_WEIGHT_TREND/2 → 0  (linear penalty, floor 0)
     """
     if ema50_gap_pct < 0:
         return 0.0
     elif ema50_gap_pct < 1.0:
-        return ema50_gap_pct * 25.0
+        return ema50_gap_pct * SCORE_WEIGHT_TREND
     elif ema50_gap_pct <= 4.0:
-        return 25.0
+        return SCORE_WEIGHT_TREND
     elif ema50_gap_pct <= 6.0:
-        return 25.0 - ((ema50_gap_pct - 4.0) / 2.0) * 12.5
+        return SCORE_WEIGHT_TREND - ((ema50_gap_pct - 4.0) / 2.0) * (SCORE_WEIGHT_TREND / 2)
     else:
-        return max(0.0, 12.5 - ((ema50_gap_pct - 6.0) / 6.0) * 12.5)
+        return max(0.0, (SCORE_WEIGHT_TREND / 2) - ((ema50_gap_pct - 6.0) / 6.0) * (SCORE_WEIGHT_TREND / 2))
 
 
 def score_short_breakout(trend: TrendResult, coil: ConsolidationResult) -> ScoreResult:
@@ -291,16 +391,16 @@ def score_short_breakout(trend: TrendResult, coil: ConsolidationResult) -> Score
 
       Component   Weight   Driver
       ─────────────────────────────────────────────
-      Risk         40 pts  tighter coil → lower risk → higher score
-      Range        35 pts  smaller range_pct → higher score
-      Trend        25 pts  piecewise curve; sweet spot 1–4% below EMA50
+      Risk         30 pts  tighter coil → lower risk → higher score
+      Range        30 pts  smaller range_pct → higher score
+      Trend        40 pts  piecewise curve; sweet spot 1–4% below EMA50
 
     Returns {"total", "risk_score", "range_score", "trend_score", "ema50_gap_pct"}.
     """
     # Risk score: derived from how wide the coil box is relative to entry
     risk_pct   = (coil["period_high"] - coil["period_low"]) / coil["period_low"] * 100
-    risk_score  = max(0.0, (MAX_RISK_PCT - risk_pct)                    / MAX_RISK_PCT    * 40)
-    range_score = max(0.0, (MAX_RANGE_PCT - coil["range_pct"])          / MAX_RANGE_PCT   * 35)
+    risk_score  = max(0.0, (MAX_RISK_PCT - risk_pct)                    / MAX_RISK_PCT    * SCORE_WEIGHT_RISK)
+    range_score = max(0.0, (MAX_RANGE_PCT - coil["range_pct"])          / MAX_RANGE_PCT   * SCORE_WEIGHT_RANGE)
 
     # For shorts: how far below EMA50 (positive = good for shorts)
     ema50_gap_pct = (trend["ema50"] - trend["close"]) / trend["ema50"] * 100
