@@ -232,7 +232,8 @@ def format_trade_row(t: dict) -> str:
     """Format a single trade as a Discord message row."""
     ticker = t["ticker"].replace(".NS", "")
     direction = "LONG" if t.get("strategy") == "long_breakout" else "SHORT"
-    status_emoji = {"ACTIVE": "🟢", "PENDING": "⏳", "CLOSED": "✅"}.get(t["status"], "⚪")
+    active_emoji = "🔴" if direction == "SHORT" else "🟢"
+    status_emoji = {"ACTIVE": active_emoji, "PENDING": "⏳", "CLOSED": "✅"}.get(t["status"], "⚪")
     
     entry = t.get("entry", 0)
     sl = t.get("stop_loss", 0)

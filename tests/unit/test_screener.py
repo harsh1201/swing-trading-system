@@ -300,6 +300,20 @@ def test_format_portfolio_for_discord():
     assert "SUMMARY" in result
     assert "Active:" in result
     assert "CLOSED1" in result
+    assert "🟢" in result  # Active long = green
+
+
+def test_format_portfolio_for_discord_short():
+    """Test Discord portfolio formatting with SHORT strategy."""
+    trades = [
+        {"ticker": "SHORT1.NS", "status": "ACTIVE", "strategy": "short_breakout", "entry": 500, "stop_loss": 530, "target": 450, "current_price": 490, "entry_trigger_date": "14-04-2026", "r_multiple": 0},
+    ]
+
+    result = format_portfolio_for_discord(trades, "short_breakout")
+
+    assert "SWING TRADING PORTFOLIO" in result
+    assert "SHORT" in result
+    assert "🔴" in result  # Active short = red, not green
 
 
 def test_format_portfolio_for_discord_empty():
@@ -426,6 +440,29 @@ def test_format_trade_row():
     result = format_trade_row(trade)
     assert "RELIANCE" in result
     assert "₹2,500" in result
+    assert "🟢" in result  # LONG active = green
+
+
+def test_format_trade_row_short_active():
+    """Test format_trade_row with SHORT active trade shows red dot."""
+    from screener import format_trade_row
+
+    trade = {
+        "ticker": "HDFCBANK.NS",
+        "status": "ACTIVE",
+        "strategy": "short_breakout",
+        "entry": 1500.0,
+        "stop_loss": 1600.0,
+        "target": 1350.0,
+        "current_price": 1480.0,
+        "entry_trigger_date": "14-04-2026",
+        "r_multiple": 0.4,
+    }
+
+    result = format_trade_row(trade)
+    assert "HDFCBANK" in result
+    assert "SHORT" in result
+    assert "🔴" in result  # SHORT active = red
 
 
 def test_format_trade_row_pending():
