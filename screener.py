@@ -869,6 +869,56 @@ def _print_portfolio_summary(trades: List[PortfolioTrade]) -> None:
     print(f"{'─' * 50}")
 
 
+def _recompute_ml_for_trade(t: dict, df: pd.DataFrame, ml_models: dict) -> None:
+    """Recompute ML predictions for an existing portfolio trade."""
+    if not ml_models:
+        return
+    sname = t["strategy"].replace("_breakout", "")
+    models = ml_models.get(sname)
+    if models is None:
+        return
+    reg = models.get("reg")
+    clf = models.get("clf")
+    if reg is None and clf is None:
+        return
+    try:
+        if sname == "long":
+            trend = check_trend(df)
+            if trend is None:
+                return
+            coil = check_consolidation(df)
+            if coil is None:
+                return
+            vol_result = check_volume(df)
+            if vol_result is None:
+                return
+            score = score_long_breakout(trend, coil)
+        else:
+            trend = check_trend_short(df)
+            if trend is None:
+                return
+            coil = check_consolidation_short(df)
+            if coil is None:
+                return
+            vol_result = check_volume(df)
+            if vol_result is None:
+                return
+            score = score_short_breakout(trend, coil)
+
+        close_val = float(df["Close"].iloc[-1])
+        atr_val = float(df["ATR"].iloc[-1]) if "ATR" in df.columns else 0.0
+        atr_pct = round(atr_val / close_val * 100, 4) if close_val > 0 else 0.0
+
+        extract_fn = extract_ml_features if sname == "long" else extract_ml_features_short
+        ml_feat = extract_fn(df, len(df) - 1, trend, coil, vol_result, score, atr_pct, 0.0)
+        if clf is not None:
+            t["ml_prob"] = round(xgb_predict(clf, ml_feat, mode="classification"), 4)
+        if reg is not None:
+            t["ml_r"] = round(xgb_predict(reg, ml_feat), 2)
+    except Exception:
+        pass
+
+
 def update_portfolio(strategy: str) -> None:
     """
     Fetch latest prices for all tracked trades and update their status.
@@ -893,6 +943,19 @@ def update_portfolio(strategy: str) -> None:
     
     if parts:
         print(f"\n  Portfolio cleanup: {', '.join(parts)}")
+
+    # ── Load XGBoost models for ML recomputation on existing trades ──────
+    ml_models: dict[str, dict[str, object | None]] = {}
+    if XGB_AVAILABLE:
+        for sname in ("long", "short"):
+            reg = None
+            clf = None
+            if USE_XGBOOST_TARGET:
+                reg = load_model(sname, mode="regression")
+            if USE_XGBOOST_CLASSIFIER:
+                clf = load_model(sname, mode="classification")
+            if reg is not None or clf is not None:
+                ml_models[sname] = {"reg": reg, "clf": clf}
 
     print("\n" + "=" * 90)
     print(f"{'CURRENT PORTFOLIO TRACKER':^90}")
@@ -961,7 +1024,10 @@ def update_portfolio(strategy: str) -> None:
         r_display = f"{t['r_multiple']:.2f}" if t["r_multiple"] != 0 else "-"
         
         direction = "LONG" if t["strategy"] == "long_breakout" else "SHORT"
-        
+
+        # ── Recompute ML predictions for existing trades ──────────────────
+        _recompute_ml_for_trade(t, df, ml_models)
+
         # Date display based on status
         added_date = t.get("date_added", "") or "-"
         trigger_date = t.get("entry_trigger_date", "") or "-"
