@@ -136,6 +136,8 @@ class PortfolioTrade(TypedDict):
     r_multiple: float  # Actual R achieved (negative for loss)
     current_price: float  # Latest price for tracking
     score: float  # Setup score at entry time (0-100)
+    ml_prob: float  # ML win probability (0.0-1.0)
+    ml_r: float     # ML predicted R-multiple
 
 class MarketRegimeInfo(TypedDict):
     close: float | None
@@ -157,6 +159,8 @@ class ScreenerSetup(TypedDict):
     vol: VolumeResult
     gap: GapUpResult
     score: ScoreResult
+    ml_r: float | None
+    ml_prob: float | None
 
 
 # ── Timezone Helper ───────────────────────────────────────────────────────────
@@ -310,9 +314,12 @@ def format_trade_row(t: dict) -> str:
     line6 = f"Stop Loss : {sl_str}"
     line7 = f"Target    : {target_str}"
     line8 = f"Score     : {score_str}"
-    line9 = f"```"
+    ml_p = t.get("ml_prob", 0)
+    ml_str = f"{ml_p*100:.0f}%" if ml_p > 0 else "--"
+    line9 = f"ML Win    : {ml_str}"
+    line10 = f"```"
 
-    return f"{line1}\n{line2}\n{line3}\n{line4}\n{line5}\n{line6}\n{line7}\n{line8}\n{line9}"
+    return f"{line1}\n{line2}\n{line3}\n{line4}\n{line5}\n{line6}\n{line7}\n{line8}\n{line9}\n{line10}"
 
 
 def format_portfolio_for_discord(trades: List[PortfolioTrade], strategy: str) -> str:
@@ -420,6 +427,9 @@ def format_signal_for_discord(setup: dict, rank: int) -> str:
     ml_prob = setup.get("ml_prob")
     if ml_prob is not None:
         lines.append(f"ML Win    : {ml_prob*100:.0f}%")
+    ml_r = setup.get("ml_r")
+    if ml_r is not None:
+        lines.append(f"ML Pred R : {ml_r:.1f}R")
     lines.append(f"Risk      : {t['risk_pct']:.1f}%")
     lines.append(f"```")
 
@@ -551,6 +561,8 @@ def print_trade_card(
     gap:    GapUpResult,
     score:  ScoreResult,
     width:  int,
+    ml_r: float | None = None,
+    ml_prob: float | None = None,
 ) -> None:
     """Print a full ranked trade-setup card for one stock (analysis mode)."""
     upside_pct  = round(float((setup["target"] - setup["entry"]) / setup["entry"] * 100), 2)
@@ -619,6 +631,12 @@ def print_trade_card(
           f"   <- +{upside_pct:.1f}% from entry".format(setup["rr_ratio"]))
     print(f"  {'Risk per share':<22}  Rs. {setup['risk']:>10,.2f}"
           f"   ({setup['risk_pct']:.2f}% of entry)")
+    if ml_prob is not None:
+        print(f"  {'ML Win Prob':<22}  {ml_prob*100:.0f}%")
+    if ml_r is not None:
+        ml_target = round(setup['entry'] + ml_r * (setup['entry'] - setup['stop_loss']), 2)
+        print(f"  {'ML Target':<22}  Rs. {ml_target:>10,.2f}"
+              f"   ({ml_r:.1f}R)")
 
 
 def print_trade_card_compact(
@@ -709,18 +727,21 @@ def print_execution_summary(
     # ── Quick reference table ──────────────────────────────────────────────────
     print()
     print(f"  {'#':<3}  {'Ticker':<16}  {'Entry':>8}  {'Stop':>8}  "
-          f"{'Target':>8}  {'Risk%':>6}  {'Score':>6}")
+          f"{'Target':>8}  {'Risk%':>6}  {'Score':>6}  {'ML%':>5}")
     print("  " + "─" * (width - 2))
     for i, s in enumerate(top_n, 1):
         sp = s["setup"]
         sc = s["score"]
+        ml_p = s.get("ml_prob", 0)
+        ml_s = f"{ml_p*100:.0f}%" if ml_p and ml_p > 0 else "-"
         print(
             f"  {i:<3}  {s['ticker']:<16}  "
             f"{sp['entry']:>8,.0f}  "
             f"{sp['stop_loss']:>8,.0f}  "
             f"{sp['target']:>8,.0f}  "
             f"{sp['risk_pct']:>5.1f}%  "
-            f"{sc['total']:>6.1f}"
+            f"{sc['total']:>6.1f}  "
+            f"{ml_s:>5}"
         )
 
     # ── Capital allocation suggestion ──────────────────────────────────────────
@@ -899,7 +920,7 @@ def update_portfolio(strategy: str) -> None:
     
     trades.sort(key=sort_key)
     
-    col = f"{'Ticker':<12} {'Dir':<5} {'Status':<9} {'Added':<11} {'Trigger':<11} {'Exit':<11} {'Days':>4} {'Entry':>8} {'SL':>8} {'Target':>9} {'Current':>9} {'Score':>6} {'R'}"
+    col = f"{'Ticker':<12} {'Dir':<5} {'Status':<9} {'Added':<11} {'Trigger':<11} {'Exit':<11} {'Days':>4} {'Entry':>8} {'SL':>8} {'Target':>9} {'Current':>9} {'Score':>6} {'ML%':>5} {'R'}"
     print(f"  {col}")
     print(f"  {'-' * len(col)}")
 
@@ -913,6 +934,10 @@ def update_portfolio(strategy: str) -> None:
             t["date_added"] = ""
         if "exit_date" not in t:
             t["exit_date"] = ""
+        if "ml_prob" not in t:
+            t["ml_prob"] = 0.0
+        if "ml_r" not in t:
+            t["ml_r"] = 0.0
         if "current_price" not in t:
             t["current_price"] = t.get("entry", 0)
         if "score" not in t:
@@ -997,7 +1022,9 @@ def update_portfolio(strategy: str) -> None:
                 r_display = f"{t['r_multiple']:.2f}"
 
         score_display = f"{t['score']:.0f}" if t.get("score", 0) > 0 else "-"
-        print(f"  {t['ticker']:<12} {direction:<5} {t['status']:<9} {added_date:<11} {trigger_date:<11} {exit_date:<11} {days_str:>4} {t['entry']:>8.2f} {t['stop_loss']:>8.2f} {t['target']:>9.2f} {curr_close:>9.2f} {score_display:>6} {r_display:>4} {status_change}")
+        ml_prob_val = t.get("ml_prob", 0)
+        ml_display = f"{ml_prob_val*100:.0f}%" if ml_prob_val > 0 else "-"
+        print(f"  {t['ticker']:<12} {direction:<5} {t['status']:<9} {added_date:<11} {trigger_date:<11} {exit_date:<11} {days_str:>4} {t['entry']:>8.2f} {t['stop_loss']:>8.2f} {t['target']:>9.2f} {curr_close:>9.2f} {score_display:>6} {ml_display:>5} {r_display:>4} {status_change}")
         
         if t["status"] != "CLOSED":
             updated_trades.append(t)
@@ -1005,7 +1032,7 @@ def update_portfolio(strategy: str) -> None:
     save_portfolio(updated_trades)
     print("=" * 90 + "\n")
 
-def add_to_portfolio(ticker: str, name: str, strategy: str, entry: float, sl: float, target: float, score: float = 0) -> None:
+def add_to_portfolio(ticker: str, name: str, strategy: str, entry: float, sl: float, target: float, score: float = 0, ml_prob: float = 0.0, ml_r: float = 0.0) -> None:
     """Add a new setup to the portfolio if it is not already tracked."""
     trades = load_portfolio()
 
@@ -1028,6 +1055,8 @@ def add_to_portfolio(ticker: str, name: str, strategy: str, entry: float, sl: fl
         "r_multiple": 0.0,
         "current_price": entry,
         "score": score,
+        "ml_prob": ml_prob,
+        "ml_r": ml_r,
     }
     trades.append(new_trade)
     save_portfolio(trades)
@@ -1221,7 +1250,7 @@ def run_screener() -> None:
         signal_date = df.index[-1].strftime("%d-%m-%Y") if hasattr(df.index[-1], "strftime") else str(df.index[-1])
         
         # Track setup in portfolio
-        add_to_portfolio(ticker, name, "long_breakout", setup["entry"], setup["stop_loss"], setup["target"], score['total'])
+        add_to_portfolio(ticker, name, "long_breakout", setup["entry"], setup["stop_loss"], setup["target"], score['total'], ml_prob_val, ml_r_val)
 
         final_setups.append({
             "name":   name,
@@ -1277,6 +1306,7 @@ def run_screener() -> None:
                     rank=i, name=s["name"], ticker=s["ticker"],
                     trend=s["trend"], cons=s["cons"], setup=s["setup"],
                     vol=s["vol"], gap=s["gap"], score=s["score"], width=width,
+                    ml_r=s.get("ml_r"), ml_prob=s.get("ml_prob"),
                 )
             print()
 
@@ -1354,6 +1384,8 @@ def print_trade_card_short(
     gap:    GapDownResult,
     score:  ShortScoreResult,
     width:  int,
+    ml_r: float | None = None,
+    ml_prob: float | None = None,
 ) -> None:
     """Print a full ranked SHORT trade-setup card for one stock (analysis mode)."""
     downside_pct = round(float((setup["entry"] - setup["target"]) / setup["entry"] * 100), 2)
@@ -1422,6 +1454,12 @@ def print_trade_card_short(
           f"   <- {downside_pct:.1f}% downside from entry".format(setup["rr_ratio"]))
     print(f"  {'Risk per share':<22}  Rs. {setup['risk']:>10,.2f}"
           f"   ({setup['risk_pct']:.2f}% of entry)")
+    if ml_prob is not None:
+        print(f"  {'ML Win Prob':<22}  {ml_prob*100:.0f}%")
+    if ml_r is not None:
+        ml_target = round(setup['entry'] - ml_r * (setup['stop_loss'] - setup['entry']), 2)
+        print(f"  {'ML Target':<22}  Rs. {ml_target:>10,.2f}"
+              f"   ({ml_r:.1f}R)")
 
 
 def print_trade_card_compact_short(
@@ -1502,18 +1540,21 @@ def print_execution_summary_short(
 
     print()
     print(f"  {'#':<3}  {'Ticker':<16}  {'Entry':>8}  {'Stop':>8}  "
-          f"{'Target':>8}  {'Risk%':>6}  {'Score':>6}")
+          f"{'Target':>8}  {'Risk%':>6}  {'Score':>6}  {'ML%':>5}")
     print("  " + "─" * (width - 2))
     for i, s in enumerate(top_n, 1):
         sp = s["setup"]
         sc = s["score"]
+        ml_p = s.get("ml_prob", 0)
+        ml_s = f"{ml_p*100:.0f}%" if ml_p and ml_p > 0 else "-"
         print(
             f"  {i:<3}  {s['ticker']:<16}  "
             f"{sp['entry']:>8,.0f}  "
             f"{sp['stop_loss']:>8,.0f}  "
             f"{sp['target']:>8,.0f}  "
             f"{sp['risk_pct']:>5.1f}%  "
-            f"{sc['total']:>6.1f}"
+            f"{sc['total']:>6.1f}  "
+            f"{ml_s:>5}"
         )
 
     print()
@@ -1722,7 +1763,7 @@ def run_screener_short() -> None:
         signal_date = df.index[-1].strftime("%d-%m-%Y") if hasattr(df.index[-1], "strftime") else str(df.index[-1])
 
         # Track setup in portfolio
-        add_to_portfolio(ticker, name, "short_breakout", setup["entry"], setup["stop_loss"], setup["target"], score['total'])
+        add_to_portfolio(ticker, name, "short_breakout", setup["entry"], setup["stop_loss"], setup["target"], score['total'], ml_prob_val, ml_r_val)
 
         final_setups.append({
             "name":   name,
@@ -1778,6 +1819,7 @@ def run_screener_short() -> None:
                     rank=i, name=s["name"], ticker=s["ticker"],
                     trend=s["trend"], cons=s["cons"], setup=s["setup"],
                     vol=s["vol"], gap=s["gap"], score=s["score"], width=width,
+                    ml_r=s.get("ml_r"), ml_prob=s.get("ml_prob"),
                 )
             print()
 

@@ -533,6 +533,11 @@ def test_add_to_portfolio():
     
     # Just verify it's callable
     assert callable(add_to_portfolio)
+    # Verify new ML params work with defaults
+    import inspect
+    sig = inspect.signature(add_to_portfolio)
+    assert "ml_prob" in sig.parameters
+    assert "ml_r" in sig.parameters
 
 
 def test_send_portfolio_to_discord_no_trades(monkeypatch):
