@@ -75,15 +75,31 @@ def test_engines(monkeypatch):
     monkeypatch.setattr("backtest.get_market_regime_short", lambda n, i, s: (True, "STRONG_BEAR", 50))
     
     # scan_candidates mock
-    def mock_scan(s, d_cur):
+    def mock_scan(s, d_cur, **kw):
         if d_cur == d[40]:
-            return [{"ticker": "T", "name": "T", "idx": 40, "df": s["T"], "entry": 105, "stop_loss": 95, "target": 125, "score": 80, "volume_ratio": 2}]
+            return [{
+                "ticker": "T", "name": "T", "idx": 40, "df": s["T"],
+                "entry": 105, "stop_loss": 95, "target": 125,
+                "score": 80, "volume_ratio": 2,
+                "trend": {"close": 100, "ema50": 95, "ema200": 90, "rs": 0.5},
+                "coil": {"period_high": 105, "period_low": 95, "range_pct": 5.0, "gap_to_high_pct": 1.0},
+                "score_result": {"total": 80, "risk_score": 25, "range_score": 25, "trend_score": 30, "ema50_gap_pct": 2.5},
+                "atr_pct": 1.5, "market_breadth": 50.0,
+            }]
         return []
     monkeypatch.setattr("backtest.scan_candidates", mock_scan)
     
-    def mock_scan_short(s, d_cur):
+    def mock_scan_short(s, d_cur, **kw):
         if d_cur == d[40]:
-            return [{"ticker": "T", "name": "T", "idx": 40, "df": s["T"], "entry": 95, "stop_loss": 105, "target": 75, "score": 80, "volume_ratio": 2}]
+            return [{
+                "ticker": "T", "name": "T", "idx": 40, "df": s["T"],
+                "entry": 95, "stop_loss": 105, "target": 75,
+                "score": 80, "volume_ratio": 2,
+                "trend": {"close": 100, "ema50": 105, "ema200": 110, "rs": -0.5},
+                "coil": {"period_high": 105, "period_low": 95, "range_pct": 5.0, "gap_to_low_pct": 1.0},
+                "score_result": {"total": 80, "risk_score": 25, "range_score": 25, "trend_score": 30, "ema50_gap_pct": 2.5},
+                "atr_pct": 1.5, "market_breadth": 50.0,
+            }]
         return []
     monkeypatch.setattr("backtest.scan_candidates_short", mock_scan_short)
     
@@ -110,8 +126,8 @@ def test_wrappers(monkeypatch):
     d = pd.date_range("2023-01-01", periods=10)
     df = pd.DataFrame({"Close": [100.0]*10}, index=d)
     monkeypatch.setattr("backtest.fetch_ohlcv", lambda t, d6, refresh=False: df)
-    monkeypatch.setattr("backtest.run_backtest", lambda n, s: ([], 100.0, 0.0))
-    monkeypatch.setattr("backtest.run_backtest_short", lambda n, s: ([], 100.0, 0.0))
+    monkeypatch.setattr("backtest.run_backtest", lambda n, s, **kw: ([], 100.0, 0.0))
+    monkeypatch.setattr("backtest.run_backtest_short", lambda n, s, **kw: ([], 100.0, 0.0))
     run_backtest_strategy()
     run_backtest_strategy_short()
 
@@ -134,9 +150,17 @@ def test_same_bar_protection(monkeypatch):
     monkeypatch.setattr("backtest.get_market_regime", lambda n, i, s: (True, "STRONG_BULL", 50))
     
     # scan candidate mock -> trigger trade on index 15
-    def mock_scan(s, d_cur):
+    def mock_scan(s, d_cur, **kw):
         if d_cur == d[15]:
-            return [{"ticker": "T", "name": "T", "idx": 15, "df": s["T"], "entry": 105.0, "stop_loss": 95.0, "target": 125.0, "score": 80, "volume_ratio": 2}]
+            return [{
+                "ticker": "T", "name": "T", "idx": 15, "df": s["T"],
+                "entry": 105.0, "stop_loss": 95.0, "target": 125.0,
+                "score": 80, "volume_ratio": 2,
+                "trend": {"close": 100, "ema50": 95, "ema200": 90, "rs": 0.5},
+                "coil": {"period_high": 105, "period_low": 95, "range_pct": 5.0, "gap_to_high_pct": 1.0},
+                "score_result": {"total": 80, "risk_score": 25, "range_score": 25, "trend_score": 30, "ema50_gap_pct": 2.5},
+                "atr_pct": 1.5, "market_breadth": 50.0,
+            }]
         return []
     monkeypatch.setattr("backtest.scan_candidates", mock_scan)
     

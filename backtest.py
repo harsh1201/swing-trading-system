@@ -78,13 +78,16 @@ from config.settings import (
     WALK_FORWARD_SPLIT_YEAR,
     DISCORD_PORTFOLIO_WEBHOOK,
     TIMEZONE,
+
 )
 from config.stocks import SECTORS, STOCKS
 from data.cache import fetch_ohlcv
 from strategies.long_breakout import (
     ConsolidationResult,
+    ScoreResult,
     TrendResult,
     add_indicators,
+    calculate_market_breadth,
     check_consolidation,
     check_liquidity,
     check_trend,
@@ -93,13 +96,21 @@ from strategies.long_breakout import (
     get_market_regime,
     score_long_breakout,
     calculate_atr,
+    extract_ml_features,
 )
 from strategies.short_breakout import (
     check_consolidation_short,
     check_trend_short,
     get_market_regime_short,
     score_short_breakout,
+    extract_ml_features_short,
 )
+
+try:
+    from strategies.xgboost_ranker import load_model, predict as xgb_predict
+    XGB_AVAILABLE = True
+except ImportError:
+    XGB_AVAILABLE = False
 
 # ── Timezone Helper ───────────────────────────────────────────────────────────
 
@@ -146,6 +157,9 @@ class _TradeBase(TypedDict):
     qty: float
     score: float
     volume_ratio: float
+    max_favorable: float
+    r_multiple: float
+    features: dict[str, float]
 
 
 class Trade(_TradeBase, total=False):
@@ -213,6 +227,7 @@ def fetch_all(tickers: list[str], refresh: bool = True) -> dict[str, pd.DataFram
 def scan_candidates(
     stock_data: dict[str, pd.DataFrame],
     date: pd.Timestamp,
+    market_breadth: float = 0.0,
 ) -> list[Candidate]:
     """
     Return all stocks passing Liquidity + Trend + Coil + Volume filters for
@@ -265,6 +280,14 @@ def scan_candidates(
         if sc["total"] < MIN_SCORE_THRESHOLD:
             continue
 
+        # ATR % at entry bar
+        atr_pct = 0.0
+        if "ATR" in df.columns:
+            atr_val = float(df["ATR"].iloc[idx])
+            close_val = float(df["Close"].iloc[idx])
+            if not pd.isna(atr_val) and close_val > 0:
+                atr_pct = round(atr_val / close_val * 100, 4)
+
         candidates.append(
             {
                 "ticker": ticker,
@@ -278,6 +301,9 @@ def scan_candidates(
                 "target": target,
                 "score": sc["total"],
                 "volume_ratio": vol["surge_ratio"],
+                "score_result": sc,
+                "atr_pct": atr_pct,
+                "market_breadth": market_breadth,
             }
         )
 
@@ -324,6 +350,11 @@ def _close(
     pnl_pct = round(float(pnl_abs / (eff_entry * qty) * 100), 2) if (eff_entry * qty) != 0 else 0.0
     bars_held = int(nifty_idx - trade["nifty_entry_idx"])
 
+    # Compute actual R-multiple achieved (for ML label)
+    risk = abs(trade["entry_price"] - trade["stop_loss"])
+    max_fav = trade.get("max_favorable", 0.0)
+    trade["r_multiple"] = round(max_fav / risk, 3) if risk > 0 else 0.0
+
     trade["exit_price"] = round(float(exit_price), 2)
     trade["exit_date"] = exit_date
     trade["outcome"] = outcome
@@ -355,6 +386,9 @@ def _close(
 def run_backtest(
     nifty_df: pd.DataFrame,
     stock_data: dict[str, pd.DataFrame],
+    xgb_model: object | None = None,
+    xgb_clf_model: object | None = None,
+    ml_threshold: float = 0.0,
 ) -> tuple[list[Trade], float]:
     """
     Concurrent multi-position backtest.
@@ -397,8 +431,11 @@ def run_backtest(
     print("  " + col)
     print("  " + "-" * len(col))
 
+    xgb_model = xgb_model if XGB_AVAILABLE else None
+
     for i in range(start_idx, len(all_dates)):
         date = all_dates[i]
+        market_breadth = calculate_market_breadth(stock_data, i, nifty_df) if stock_data else 0.0
 
         # ── STEP A: Update every open trade ───────────────────────────────────
         still_open: list[Trade] = []
@@ -421,6 +458,10 @@ def run_backtest(
             high_bar = float(df["High"].iloc[bar])
             low_bar = float(df["Low"].iloc[bar])
             close_bar = float(df["Close"].iloc[bar])
+
+            # Track max favorable excursion for ML label
+            favorable = high_bar - entry
+            trade["max_favorable"] = max(trade.get("max_favorable", 0.0), favorable)
 
             is_entry_bar = i == trade["nifty_entry_idx"]
 
@@ -507,7 +548,7 @@ def run_backtest(
             continue
 
         active_tickers = {t["ticker"] for t in active_trades}
-        candidates = scan_candidates(stock_data, date)
+        candidates = scan_candidates(stock_data, date, market_breadth=market_breadth)
         candidates = [c for c in candidates if c["ticker"] not in active_tickers]
 
         slots = effective_max - len(active_trades)
@@ -539,7 +580,30 @@ def run_backtest(
 
             entry_price = round(float(cand["entry"]), 2)
             stop_loss = round(float(cand["stop_loss"]), 2)
+            risk_raw = entry_price - stop_loss
             target = round(float(cand["target"]), 2)
+
+            # XGBoost feature vector (shared by regressor + classifier)
+            ml_features = None
+            if (xgb_model is not None or xgb_clf_model is not None) and XGB_AVAILABLE:
+                ml_features = extract_ml_features(
+                    cand["df"], cand["idx"],
+                    cand["trend"], cand["coil"],
+                    {"surge_ratio": cand["volume_ratio"]},
+                    cand.get("score_result"),
+                    cand.get("atr_pct", 0.0),
+                    cand.get("market_breadth", 0.0),
+                )
+            # XGBoost target override: predict dynamic R-multiple
+            if xgb_model is not None and ml_features is not None:
+                predicted_r = xgb_predict(xgb_model, ml_features)
+                target = round(float(entry_price + predicted_r * risk_raw), 2)
+
+            # XGBoost classifier: skip low-confidence setups
+            if xgb_clf_model is not None and ml_features is not None:
+                win_prob = xgb_predict(xgb_clf_model, ml_features, mode="classification")
+                if win_prob < ml_threshold:
+                    continue
 
             # Slippage: we fill slightly above the signal price on entry
             effective_entry = round(float(entry_price * (1 + SLIPPAGE_PCT)), 2)
@@ -564,13 +628,23 @@ def run_backtest(
             else:
                 nifty_entry_idx = i + 1
 
+            # Build feature vector for ML (always computed for data export)
+            ml_features = extract_ml_features(
+                cand["df"], cand["idx"],
+                cand["trend"], cand["coil"],
+                {"surge_ratio": cand["volume_ratio"]},
+                cand.get("score_result"),
+                cand.get("atr_pct", 0.0),
+                cand.get("market_breadth", 0.0),
+            )
+
             new_trade: Trade = {
                 "ticker": cand["ticker"],
                 "name": cand["name"],
                 "sector": sector,
                 "df": cand["df"],
-                "entry_price": entry_price,  # signal / trigger level
-                "effective_entry": effective_entry,  # actual fill (used for P&L)
+                "entry_price": entry_price,
+                "effective_entry": effective_entry,
                 "stop_loss": stop_loss,
                 "target": target,
                 "active_sl": stop_loss,
@@ -580,7 +654,10 @@ def run_backtest(
                 "qty": qty,
                 "score": cand["score"],
                 "volume_ratio": cand["volume_ratio"],
-                "entry_bar": next_bar,  # store for ATR trailing
+                "entry_bar": next_bar,
+                "max_favorable": 0.0,
+                "r_multiple": 0.0,
+                "features": ml_features,
             }
             active_trades.append(new_trade)
             active_tickers.add(cand["ticker"])
@@ -906,7 +983,14 @@ def send_backtest_to_discord(strategy: str, trades: list[Trade], final_equity: f
 
 
 
-def run_backtest_strategy(export: bool = False, refresh: bool = True) -> None:
+def run_backtest_strategy(
+    export: bool = False,
+    refresh: bool = True,
+    export_ml: bool = False,
+    use_xgb: bool = False,
+    use_xgb_clf: bool = False,
+    ml_threshold: float = 0.0,
+) -> None:
     """Run the full breakout backtest pipeline."""
     width = 62
     print("=" * width)
@@ -915,8 +999,29 @@ def run_backtest_strategy(export: bool = False, refresh: bool = True) -> None:
     print(
         f"{f'Coil {COIL_CANDLES}c  Range<{int(MAX_RANGE_PCT)}%  NearHigh<{int(NEAR_HIGH_PCT)}%  RR 1:{int(REWARD_RATIO)}':^{width}}"
     )
+    if use_xgb:
+        print(f"{'ML Target : XGBoost Dynamic (USE_XGBOOST_TARGET)':^{width}}")
+    if use_xgb_clf:
+        print(f"{'ML Filter  : Win-prob ≥ ' + str(ml_threshold) + ' (classifier)':^{width}}")
     print(f"{'Run date : ' + get_today_str():^{width}}")
     print("=" * width)
+
+    # Load XGBoost model if requested
+    xgb_model = None
+    if use_xgb and XGB_AVAILABLE:
+        xgb_model = load_model("long", mode="regression")
+        if xgb_model is None:
+            print("  [!] XGBoost regression model not found. Falling back to fixed target.")
+    elif use_xgb and not XGB_AVAILABLE:
+        print("  [!] xgboost_ranker not available. Install xgboost first.")
+
+    xgb_clf_model = None
+    if use_xgb_clf and XGB_AVAILABLE:
+        xgb_clf_model = load_model("long", mode="classification")
+        if xgb_clf_model is None:
+            print("  [!] XGBoost classifier model not found. Train with --train first.")
+    elif use_xgb_clf and not XGB_AVAILABLE:
+        print("  [!] xgboost_ranker not available. Install xgboost first.")
 
     print("\n  Fetching data ...\n")
     all_tickers = [NIFTY_TICKER] + list(STOCKS.keys())
@@ -939,7 +1044,12 @@ def run_backtest_strategy(export: bool = False, refresh: bool = True) -> None:
     print(f"{'TRADE LOG':^{width}}")
     print("─" * width)
 
-    trades, final_equity, max_drawdown = run_backtest(nifty_df, stock_data)
+    trades, final_equity, max_drawdown = run_backtest(
+        nifty_df, stock_data,
+        xgb_model=xgb_model,
+        xgb_clf_model=xgb_clf_model,
+        ml_threshold=ml_threshold,
+    )
 
     if not trades:
         print("\n  No trades were generated in the backtest period.")
@@ -990,6 +1100,24 @@ def run_backtest_strategy(export: bool = False, refresh: bool = True) -> None:
         df_trades.to_csv(filename, index=False)
         print(f"\n  [+] Exported {len(trades)} trades to {filename}\n")
 
+    if export_ml:
+        ml_rows = []
+        for t in trades:
+            row = dict(t.get("features", {}))
+            row["ticker"] = t["ticker"]
+            row["signal_date"] = t["signal_date"]
+            row["entry_price"] = t["entry_price"]
+            row["stop_loss"] = t["stop_loss"]
+            row["target"] = t["target"]
+            row["r_multiple"] = t.get("r_multiple", 0.0)
+            row["outcome"] = t["outcome"]
+            row["bars_held"] = t.get("bars_held", 0)
+            ml_rows.append(row)
+        df_ml = pd.DataFrame(ml_rows)
+        ml_path = "reports/ml/training_data_long.csv"
+        df_ml.to_csv(ml_path, index=False)
+        print(f"\n  [+] ML training data exported: {ml_path} ({len(ml_rows)} trades)\n")
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SHORT BREAKDOWN BACKTEST
@@ -999,6 +1127,7 @@ def run_backtest_strategy(export: bool = False, refresh: bool = True) -> None:
 def scan_candidates_short(
     stock_data: dict[str, pd.DataFrame],
     date: pd.Timestamp,
+    market_breadth: float = 0.0,
 ) -> list[Candidate]:
     """
     Return all stocks passing Liquidity + Bearish Trend + Coil-near-low +
@@ -1049,6 +1178,14 @@ def scan_candidates_short(
         if sc["total"] < MIN_SCORE_THRESHOLD:
             continue
 
+        # ATR % at entry bar
+        atr_pct = 0.0
+        if "ATR" in df.columns:
+            atr_val = float(df["ATR"].iloc[idx])
+            close_val = float(df["Close"].iloc[idx])
+            if not pd.isna(atr_val) and close_val > 0:
+                atr_pct = round(atr_val / close_val * 100, 4)
+
         candidates.append(
             {
                 "ticker": ticker,
@@ -1062,6 +1199,9 @@ def scan_candidates_short(
                 "target": target,
                 "score": sc["total"],
                 "volume_ratio": vol["surge_ratio"],
+                "score_result": sc,
+                "atr_pct": atr_pct,
+                "market_breadth": market_breadth,
             }
         )
 
@@ -1104,6 +1244,11 @@ def _close_short(
     pnl_pct = round(float(pnl_abs / (eff_entry * qty) * 100), 2) if (eff_entry * qty) != 0 else 0.0
     bars_held = int(nifty_idx - trade["nifty_entry_idx"])
 
+    # Compute actual R-multiple achieved (for ML label)
+    risk = abs(trade["entry_price"] - trade["stop_loss"])
+    max_fav = trade.get("max_favorable", 0.0)
+    trade["r_multiple"] = round(max_fav / risk, 3) if risk > 0 else 0.0
+
     trade["exit_price"] = round(float(exit_price), 2)
     trade["exit_date"] = exit_date
     trade["outcome"] = outcome
@@ -1132,6 +1277,9 @@ def _close_short(
 def run_backtest_short(
     nifty_df: pd.DataFrame,
     stock_data: dict[str, pd.DataFrame],
+    xgb_model: object | None = None,
+    xgb_clf_model: object | None = None,
+    ml_threshold: float = 0.0,
 ) -> tuple[list[Trade], float]:
     """
     Concurrent multi-position SHORT backtest.
@@ -1173,8 +1321,11 @@ def run_backtest_short(
     print("  " + col)
     print("  " + "-" * len(col))
 
+    xgb_model = xgb_model if XGB_AVAILABLE else None
+
     for i in range(start_idx, len(all_dates)):
         date = all_dates[i]
+        market_breadth = calculate_market_breadth(stock_data, i, nifty_df) if stock_data else 0.0
 
         # ── STEP A: Update every open short trade ────────────────────────────
         still_open: list[Trade] = []
@@ -1197,6 +1348,10 @@ def run_backtest_short(
             high_bar = float(df["High"].iloc[bar])
             low_bar = float(df["Low"].iloc[bar])
             close_bar = float(df["Close"].iloc[bar])
+
+            # Track max favorable excursion (price moving down = favorable for shorts)
+            favorable = entry - low_bar
+            trade["max_favorable"] = max(trade.get("max_favorable", 0.0), favorable)
 
             is_entry_bar = i == trade["nifty_entry_idx"]
 
@@ -1288,7 +1443,7 @@ def run_backtest_short(
             continue
 
         active_tickers = {t["ticker"] for t in active_trades}
-        candidates = scan_candidates_short(stock_data, date)
+        candidates = scan_candidates_short(stock_data, date, market_breadth=market_breadth)
         candidates = [c for c in candidates if c["ticker"] not in active_tickers]
 
         slots = effective_max - len(active_trades)
@@ -1318,7 +1473,30 @@ def run_backtest_short(
 
             entry_price = round(float(cand["entry"]), 2)
             stop_loss = round(float(cand["stop_loss"]), 2)
+            risk_raw = stop_loss - entry_price
             target = round(float(cand["target"]), 2)
+
+            # XGBoost feature vector (shared by regressor + classifier)
+            ml_features = None
+            if (xgb_model is not None or xgb_clf_model is not None) and XGB_AVAILABLE:
+                ml_features = extract_ml_features_short(
+                    cand["df"], cand["idx"],
+                    cand["trend"], cand["coil"],
+                    {"surge_ratio": cand["volume_ratio"]},
+                    cand.get("score_result"),
+                    cand.get("atr_pct", 0.0),
+                    cand.get("market_breadth", 0.0),
+                )
+            # XGBoost target override: predict dynamic R-multiple
+            if xgb_model is not None and ml_features is not None:
+                predicted_r = xgb_predict(xgb_model, ml_features)
+                target = round(float(entry_price - predicted_r * risk_raw), 2)
+
+            # XGBoost classifier: skip low-confidence setups
+            if xgb_clf_model is not None and ml_features is not None:
+                win_prob = xgb_predict(xgb_clf_model, ml_features, mode="classification")
+                if win_prob < ml_threshold:
+                    continue
 
             # Slippage: short entry fills slightly lower than signal price
             effective_entry = round(float(entry_price * (1 - SLIPPAGE_PCT)), 2)
@@ -1341,6 +1519,17 @@ def run_backtest_short(
             else:
                 nifty_entry_idx = i + 1
 
+            # Always compute features for ML data export
+            if ml_features is None and XGB_AVAILABLE:
+                ml_features = extract_ml_features_short(
+                    cand["df"], cand["idx"],
+                    cand["trend"], cand["coil"],
+                    {"surge_ratio": cand["volume_ratio"]},
+                    cand.get("score_result"),
+                    cand.get("atr_pct", 0.0),
+                    cand.get("market_breadth", 0.0),
+                )
+
             new_trade: Trade = {
                 "ticker": cand["ticker"],
                 "name": cand["name"],
@@ -1357,7 +1546,10 @@ def run_backtest_short(
                 "qty": qty,
                 "score": cand["score"],
                 "volume_ratio": cand["volume_ratio"],
-                "entry_bar": next_bar,  # store for ATR trailing
+                "entry_bar": next_bar,
+                "max_favorable": 0.0,
+                "r_multiple": 0.0,
+                "features": ml_features,
             }
             active_trades.append(new_trade)
             active_tickers.add(cand["ticker"])
@@ -1470,7 +1662,14 @@ def print_summary_short(trades: list[Trade], final_equity: float, max_drawdown: 
     print()
 
 
-def run_backtest_strategy_short(export: bool = False, refresh: bool = True) -> None:
+def run_backtest_strategy_short(
+    export: bool = False,
+    refresh: bool = True,
+    export_ml: bool = False,
+    use_xgb: bool = False,
+    use_xgb_clf: bool = False,
+    ml_threshold: float = 0.0,
+) -> None:
     """Run the full short breakdown backtest pipeline."""
     width = 62
     print("=" * width)
@@ -1479,8 +1678,29 @@ def run_backtest_strategy_short(export: bool = False, refresh: bool = True) -> N
     print(
         f"{f'Coil {COIL_CANDLES}c  Range<{int(MAX_RANGE_PCT)}%  NearLow<{int(NEAR_HIGH_PCT)}%  RR 1:{int(REWARD_RATIO)}':^{width}}"
     )
+    if use_xgb:
+        print(f"{'ML Target : XGBoost Dynamic (USE_XGBOOST_TARGET)':^{width}}")
+    if use_xgb_clf:
+        print(f"{'ML Filter  : Win-prob ≥ ' + str(ml_threshold) + ' (classifier)':^{width}}")
     print(f"{'Run date : ' + get_today_str():^{width}}")
     print("=" * width)
+
+    # Load XGBoost model if requested
+    xgb_model = None
+    if use_xgb and XGB_AVAILABLE:
+        xgb_model = load_model("short", mode="regression")
+        if xgb_model is None:
+            print("  [!] XGBoost regression model not found. Falling back to fixed target.")
+    elif use_xgb and not XGB_AVAILABLE:
+        print("  [!] xgboost_ranker not available. Install xgboost first.")
+
+    xgb_clf_model = None
+    if use_xgb_clf and XGB_AVAILABLE:
+        xgb_clf_model = load_model("short", mode="classification")
+        if xgb_clf_model is None:
+            print("  [!] XGBoost classifier model not found. Train with --train first.")
+    elif use_xgb_clf and not XGB_AVAILABLE:
+        print("  [!] xgboost_ranker not available. Install xgboost first.")
 
     print("\n  Fetching data ...\n")
     all_tickers = [NIFTY_TICKER] + list(STOCKS.keys())
@@ -1503,7 +1723,12 @@ def run_backtest_strategy_short(export: bool = False, refresh: bool = True) -> N
     print(f"{'SHORT TRADE LOG':^{width}}")
     print("─" * width)
 
-    trades, final_equity, max_drawdown = run_backtest_short(nifty_df, stock_data)
+    trades, final_equity, max_drawdown = run_backtest_short(
+        nifty_df, stock_data,
+        xgb_model=xgb_model,
+        xgb_clf_model=xgb_clf_model,
+        ml_threshold=ml_threshold,
+    )
 
     if not trades:
         print("\n  No short trades were generated in the backtest period.")
@@ -1554,6 +1779,24 @@ def run_backtest_strategy_short(export: bool = False, refresh: bool = True) -> N
         df_trades.to_csv(filename, index=False)
         print(f"\n  [+] Exported {len(trades)} trades to {filename}\n")
 
+    if export_ml:
+        ml_rows = []
+        for t in trades:
+            row = dict(t.get("features", {}))
+            row["ticker"] = t["ticker"]
+            row["signal_date"] = t["signal_date"]
+            row["entry_price"] = t["entry_price"]
+            row["stop_loss"] = t["stop_loss"]
+            row["target"] = t["target"]
+            row["r_multiple"] = t.get("r_multiple", 0.0)
+            row["outcome"] = t["outcome"]
+            row["bars_held"] = t.get("bars_held", 0)
+            ml_rows.append(row)
+        df_ml = pd.DataFrame(ml_rows)
+        ml_path = "reports/ml/training_data_short.csv"
+        df_ml.to_csv(ml_path, index=False)
+        print(f"\n  [+] ML training data exported: {ml_path} ({len(ml_rows)} trades)\n")
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="NSE Swing Trade Backtest")
@@ -1573,13 +1816,48 @@ def main() -> None:
         action="store_true",
         help="Skip refreshing data - use cached data only",
     )
+    parser.add_argument(
+        "--export-ml-data",
+        action="store_true",
+        help="Export ML training data (features + r_multiple) to CSV",
+    )
+    parser.add_argument(
+        "--use-xgb-target",
+        action="store_true",
+        help="Use XGBoost-predicted dynamic target instead of fixed 2.0R",
+    )
+    parser.add_argument(
+        "--use-xgb-classifier",
+        action="store_true",
+        help="Use XGBoost win-probability classifier to filter candidates",
+    )
+    parser.add_argument(
+        "--ml-threshold",
+        type=float,
+        default=0.30,
+        help="Minimum win probability to accept a trade (default: 0.30)",
+    )
     args = parser.parse_args()
 
     # Strategy dispatch — add new strategies here as elif branches
     if args.strategy == "long_breakout":
-        run_backtest_strategy(export=args.export, refresh=not args.no_refresh)
+        run_backtest_strategy(
+            export=args.export,
+            refresh=not args.no_refresh,
+            export_ml=args.export_ml_data,
+            use_xgb=args.use_xgb_target,
+            use_xgb_clf=args.use_xgb_classifier,
+            ml_threshold=args.ml_threshold,
+        )
     elif args.strategy == "short_breakout":
-        run_backtest_strategy_short(export=args.export, refresh=not args.no_refresh)
+        run_backtest_strategy_short(
+            export=args.export,
+            refresh=not args.no_refresh,
+            export_ml=args.export_ml_data,
+            use_xgb=args.use_xgb_target,
+            use_xgb_clf=args.use_xgb_classifier,
+            ml_threshold=args.ml_threshold,
+        )
     else:
         print(f"Unknown strategy: {args.strategy}")
         raise SystemExit(1)

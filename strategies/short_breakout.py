@@ -452,3 +452,33 @@ def calculate_trade_setup_short(
         "rr_ratio":   reward_ratio,
         "is_valid":   risk_pct <= max_risk_pct,
     }
+
+
+# ── ML Feature Extraction ──────────────────────────────────────────────────────
+
+def extract_ml_features_short(
+    df: pd.DataFrame,
+    idx: int,
+    trend: TrendResult,
+    coil: ConsolidationResult,
+    vol: VolumeResult,
+    score: ScoreResult,
+    atr_pct: float,
+    market_breadth: float,
+) -> dict[str, float]:
+    """
+    Build the feature vector for SHORT-side XGBoost target-prediction model.
+    All values are known at entry time (bar `idx`).
+    """
+    return {
+        "coil_range_pct": coil["range_pct"],
+        "ema50_gap_pct": score["ema50_gap_pct"],
+        "volume_ratio": vol["surge_ratio"],
+        "score_total": score["total"],
+        "score_risk": score["risk_score"],
+        "score_range": score["range_score"],
+        "score_trend": score["trend_score"],
+        "rs_value": trend.get("rs", 0.0),
+        "atr_pct": atr_pct,
+        "market_breadth": market_breadth,
+    }

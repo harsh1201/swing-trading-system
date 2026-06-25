@@ -73,6 +73,9 @@ from config.settings import (
     DISCORD_LONG_SIGNALS_WEBHOOK,
     DISCORD_SHORT_SIGNALS_WEBHOOK,
     TIMEZONE,
+    USE_XGBOOST_TARGET,
+    USE_XGBOOST_CLASSIFIER,
+    XGB_CLF_THRESHOLD,
 )
 from strategies.long_breakout import (
     TrendResult,
@@ -92,6 +95,7 @@ from strategies.long_breakout import (
     check_gap_up,
     score_long_breakout,
     calculate_trade_setup,
+    extract_ml_features,
 )
 from strategies.short_breakout import (
     TrendResult as ShortTrendResult,
@@ -105,7 +109,14 @@ from strategies.short_breakout import (
     check_gap_down,
     score_short_breakout,
     calculate_trade_setup_short,
+    extract_ml_features_short,
 )
+
+try:
+    from strategies.xgboost_ranker import load_model, predict as xgb_predict
+    XGB_AVAILABLE = True
+except ImportError:
+    XGB_AVAILABLE = False
 
 
 # ── Type definitions ─────────────────────────────────────────────────────────
@@ -406,6 +417,9 @@ def format_signal_for_discord(setup: dict, rank: int) -> str:
     lines.append(f"Stop Loss : ₹{t['stop_loss']:,.0f}")
     lines.append(f"Target    : ₹{t['target']:,.0f}")
     lines.append(f"Score     : {score['total']:.1f}/100")
+    ml_prob = setup.get("ml_prob")
+    if ml_prob is not None:
+        lines.append(f"ML Win    : {ml_prob*100:.0f}%")
     lines.append(f"Risk      : {t['risk_pct']:.1f}%")
     lines.append(f"```")
 
@@ -615,10 +629,11 @@ def print_trade_card_compact(
     score:  ScoreResult,
     vol:    VolumeResult,
     width:  int,
+    ml_r: float | None = None,
+    ml_prob: float | None = None,
 ) -> None:
     """
     Minimal trade card for LIVE_MODE — clean and actionable.
-    Contains only the fields a trader needs at execution time.
     """
     label     = _rank_label(rank)
     upside    = round(float((setup["target"] - setup["entry"]) / setup["entry"] * 100), 2)
@@ -630,6 +645,14 @@ def print_trade_card_compact(
     print(f"  {'Stop Loss':<14}  Rs. {setup['stop_loss']:>10,.2f}")
     print(f"  {'Target':<14}  Rs. {setup['target']:>10,.2f}"
           f"   (+{upside:.1f}% upside)")
+    if ml_prob is not None:
+        pct = ml_prob * 100
+        print(f"  {'ML Win Prob':<14}  {pct:.0f}%")
+    if ml_r is not None:
+        ml_upside = round(float((setup['entry'] / 100) * (100 + ml_r * setup['risk_pct']) - setup['entry']), 2)
+        ml_target = round(setup['entry'] + ml_r * (setup['entry'] - setup['stop_loss']), 2)
+        print(f"  {'ML Target':<14}  Rs. {ml_target:>10,.2f}"
+              f"   ({ml_r:.1f}R, +{ml_upside:.1f}%)")
     print(f"  {'Risk':<14}  {setup['risk_pct']:.2f}%"
           f"   (Rs. {setup['risk']:,.2f} / share)")
     print(f"  {'Score':<14}  {score['total']:.1f} / 100")
@@ -1031,6 +1054,19 @@ def run_screener() -> None:
     print(f"{'Stage 3d: Earnings blackout (' + str(EARNINGS_LOOKBACK_DAYS) + 'd / ' + str(EARNINGS_LOOKAHEAD_DAYS) + 'd)':^{width}}")
     print(f"{'Date : ' + today.strftime('%d-%m-%Y  %H:%M'):^{width}}")
 
+    # ── XGBoost models ────────────────────────────────────────────────────────
+    xgb_model = None
+    if USE_XGBOOST_TARGET and XGB_AVAILABLE:
+        xgb_model = load_model("long", mode="regression")
+        if xgb_model is None:
+            pass
+
+    xgb_clf_model = None
+    if USE_XGBOOST_CLASSIFIER and XGB_AVAILABLE:
+        xgb_clf_model = load_model("long", mode="classification")
+        if xgb_clf_model is None:
+            pass
+
     # ── Update tracked trades first ───────────────────────────────────────────
     update_portfolio("long_breakout")
 
@@ -1152,6 +1188,24 @@ def run_screener() -> None:
 
         score = score_long_breakout(trend, coil)
 
+        # ML feature vector (shared by regressor + classifier)
+        ml_features = None
+        if (xgb_model is not None or xgb_clf_model is not None) and XGB_AVAILABLE:
+            close_val = float(df["Close"].iloc[-1])
+            atr_val = float(df["ATR"].iloc[-1]) if "ATR" in df.columns else 0.0
+            atr_pct = round(atr_val / close_val * 100, 4) if close_val > 0 else 0.0
+            ml_features = extract_ml_features(
+                df, len(df) - 1, trend, coil, vol, score, atr_pct, 0.0,
+            )
+        # ML target prediction (regression)
+        ml_r_val = None
+        if xgb_model is not None and ml_features is not None:
+            ml_r_val = round(xgb_predict(xgb_model, ml_features), 2)
+        # ML win probability (classifier)
+        ml_prob_val = None
+        if xgb_clf_model is not None and ml_features is not None:
+            ml_prob_val = round(xgb_predict(xgb_clf_model, ml_features, mode="classification"), 4)
+
         # Check if already in portfolio (skip PENDING/ACTIVE, allow CLOSED for re-entry)
         in_portfolio = any(t["ticker"] == ticker for t in portfolio_trades)
         if in_portfolio:
@@ -1180,6 +1234,8 @@ def run_screener() -> None:
             "vol":    vol,
             "gap":    gap,
             "score":  score,
+            "ml_r":  ml_r_val,
+            "ml_prob": ml_prob_val,
         })
 
     # ── Sort by score ──────────────────────────────────────────────────────────
@@ -1214,7 +1270,7 @@ def run_screener() -> None:
                 print_trade_card_compact(
                     rank=i, name=s["name"], ticker=s["ticker"],
                     setup=s["setup"], score=s["score"], vol=s["vol"],
-                    width=width,
+                    width=width, ml_r=s.get("ml_r"), ml_prob=s.get("ml_prob"),
                 )
             else:
                 print_trade_card(
@@ -1376,6 +1432,8 @@ def print_trade_card_compact_short(
     score:  ShortScoreResult,
     vol:    VolumeResult,
     width:  int,
+    ml_r: float | None = None,
+    ml_prob: float | None = None,
 ) -> None:
     """Minimal SHORT trade card for LIVE_MODE."""
     label    = _rank_label(rank)
@@ -1388,6 +1446,15 @@ def print_trade_card_compact_short(
     print(f"  {'Stop Loss':<14}  Rs. {setup['stop_loss']:>10,.2f}")
     print(f"  {'Target':<14}  Rs. {setup['target']:>10,.2f}"
           f"   ({downside:.1f}% downside)")
+    if ml_prob is not None:
+        pct = ml_prob * 100
+        print(f"  {'ML Win Prob':<14}  {pct:.0f}%")
+    if ml_r is not None:
+        ml_upside = round(float(setup['entry'] - (setup['entry'] - ml_r * (setup['stop_loss'] - setup['entry']))), 2)
+        ml_target = round(setup['entry'] - ml_r * (setup['stop_loss'] - setup['entry']), 2)
+        ml_dn = round((setup['entry'] - ml_target) / setup['entry'] * 100, 1)
+        print(f"  {'ML Target':<14}  Rs. {ml_target:>10,.2f}"
+              f"   ({ml_r:.1f}R, -{ml_dn:.1f}%)")
     print(f"  {'Risk':<14}  {setup['risk_pct']:.2f}%"
           f"   (Rs. {setup['risk']:,.2f} / share)")
     print(f"  {'Score':<14}  {score['total']:.1f} / 100")
@@ -1483,6 +1550,19 @@ def run_screener_short() -> None:
     print(f"{'Date : ' + today.strftime('%d-%m-%Y  %H:%M'):^{width}}")
     print(f"{'Universe : ' + str(total) + ' stocks':^{width}}")
     print("=" * width)
+
+    # ── XGBoost models ────────────────────────────────────────────────────────
+    xgb_model = None
+    if USE_XGBOOST_TARGET and XGB_AVAILABLE:
+        xgb_model = load_model("short", mode="regression")
+        if xgb_model is None:
+            pass
+
+    xgb_clf_model = None
+    if USE_XGBOOST_CLASSIFIER and XGB_AVAILABLE:
+        xgb_clf_model = load_model("short", mode="classification")
+        if xgb_clf_model is None:
+            pass
 
     # ── Update tracked trades first ───────────────────────────────────────────
     update_portfolio("short_breakout")
@@ -1609,6 +1689,24 @@ def run_screener_short() -> None:
 
         score = score_short_breakout(trend, coil)
 
+        # ML feature vector (shared by regressor + classifier)
+        ml_features = None
+        if (xgb_model is not None or xgb_clf_model is not None) and XGB_AVAILABLE:
+            close_val = float(df["Close"].iloc[-1])
+            atr_val = float(df["ATR"].iloc[-1]) if "ATR" in df.columns else 0.0
+            atr_pct = round(atr_val / close_val * 100, 4) if close_val > 0 else 0.0
+            ml_features = extract_ml_features_short(
+                df, len(df) - 1, trend, coil, vol, score, atr_pct, 0.0,
+            )
+        # ML target prediction (regression)
+        ml_r_val = None
+        if xgb_model is not None and ml_features is not None:
+            ml_r_val = round(xgb_predict(xgb_model, ml_features), 2)
+        # ML win probability (classifier)
+        ml_prob_val = None
+        if xgb_clf_model is not None and ml_features is not None:
+            ml_prob_val = round(xgb_predict(xgb_clf_model, ml_features, mode="classification"), 4)
+
         # Check if already in portfolio (skip PENDING/ACTIVE, allow CLOSED for re-entry)
         in_portfolio = any(t["ticker"] == ticker for t in portfolio_trades)
         if in_portfolio:
@@ -1637,6 +1735,8 @@ def run_screener_short() -> None:
             "vol":    vol,
             "gap":    gap,
             "score":  score,
+            "ml_r":  ml_r_val,
+            "ml_prob": ml_prob_val,
         })
 
     # ── Sort by score ────────────────────────────────────────────────────────
@@ -1671,7 +1771,7 @@ def run_screener_short() -> None:
                 print_trade_card_compact_short(
                     rank=i, name=s["name"], ticker=s["ticker"],
                     setup=s["setup"], score=s["score"], vol=s["vol"],
-                    width=width,
+                    width=width, ml_r=s.get("ml_r"), ml_prob=s.get("ml_prob"),
                 )
             else:
                 print_trade_card_short(

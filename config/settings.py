@@ -108,6 +108,28 @@ MIN_SCORE_THRESHOLD = 0       # skip candidates scoring below this (0 = no filte
 MIN_AVG_VOLUME      = 0       # reserved — use MIN_AVG_TURNOVER instead
 MAX_GAP_PCT         = 0.02    # maximum acceptable gap-up fraction (future use)
 
+# ── XGBoost Dynamic Target Optimization ───────────────────────────────────────
+USE_XGBOOST_TARGET  = False   # Toggle: use ML-predicted target
+XGB_MIN_R           = 1.0     # Clamp predicted R-multiple to this minimum
+XGB_MAX_R           = 4.0     # Clamp predicted R-multiple to this maximum
+XGB_FEATURE_NAMES   = [
+    "coil_range_pct",
+    "ema50_gap_pct",
+    "volume_ratio",
+    "score_total",
+    "score_risk",
+    "score_range",
+    "score_trend",
+    "rs_value",
+    "atr_pct",
+    "market_breadth",
+]
+
+# ── XGBoost Entry Classifier (probability of hitting target) ───────────────────
+USE_XGBOOST_CLASSIFIER = True    # Toggle: use ML win-probability for ranking
+XGB_CLF_MODEL_PATH     = "models/xgb_classifier_{strategy}.json"
+XGB_CLF_THRESHOLD      = 0.45    # Min win-probability to consider a trade
+
 # ── Data-fetching windows ──────────────────────────────────────────────────────
 SCREENER_DAYS        = 420    # calendar days for screener (~14 months)
 BACKTEST_FETCH_DAYS  = 3000   # calendar days fetched (~8.2 yrs incl. EMA warmup)
