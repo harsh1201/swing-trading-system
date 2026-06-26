@@ -51,7 +51,7 @@ MAX_CONCURRENT_TRADES = 5         # maximum simultaneous open positions
 
 
 # ── Risk controls ──────────────────────────────────────────────────────────────
-MAX_TRADES_PER_SECTOR        = 2    # max simultaneous open positions per sector
+MAX_TRADES_PER_SECTOR        = 20    # max simultaneous open positions per sector
 MAX_POSITION_PCT             = 25   # single position value <= this % of equity
 EARLY_TREND_MAX_TRADES_FACTOR = 1.0  # reduce MAX_CONCURRENT_TRADES in EARLY_TREND
                                       # 1.0 = no reduction (default)

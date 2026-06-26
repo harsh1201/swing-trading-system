@@ -24,7 +24,7 @@ from backtest import (
 )
 
 def test_get_sector():
-    assert get_sector("HDFCBANK.NS") == "BANKING"
+    assert get_sector("HDFCBANK.NS") == "OTHER"
     assert get_sector("UNKNOWN.NS") == "OTHER"
 
 def test_close_logic():

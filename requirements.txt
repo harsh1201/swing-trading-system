@@ -16,3 +16,4 @@ six==1.17.0
 soupsieve==2.8.3
 xgboost==3.0.1
 scikit-learn==1.6.1
+nsepython

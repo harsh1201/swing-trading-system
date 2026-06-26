@@ -80,7 +80,7 @@ from config.settings import (
     TIMEZONE,
 
 )
-from config.stocks import SECTORS, STOCKS
+from config.stocks import STOCKS
 from data.cache import fetch_ohlcv
 from strategies.long_breakout import (
     ConsolidationResult,
@@ -187,8 +187,8 @@ class PeriodStats(TypedDict):
 
 
 def get_sector(ticker: str) -> str:
-    """Return the sector for a ticker (strips .NS/.BO); falls back to 'OTHER'."""
-    return SECTORS.get(ticker.split(".")[0], "OTHER")
+    """Return sector for a ticker. Always 'OTHER' — dynamic universe has no hardcoded sectors."""
+    return "OTHER"
 
 
 # ── Data helpers ──────────────────────────────────────────────────────────────
