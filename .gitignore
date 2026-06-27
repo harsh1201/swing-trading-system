@@ -1,5 +1,8 @@
 # Persistent storage and cache
 data/
+!data/
+data/*
+!data/symbols.py
 storage/
 *.csv
 *.json

@@ -119,6 +119,13 @@ except ImportError:
     XGB_AVAILABLE = False
 
 
+def is_fno_symbol(ticker: str) -> bool:
+    """Return True when ticker matches an NSE F&O symbol."""
+    symbol = str(ticker).strip().upper()
+    base = symbol.replace(".NS", "")
+    return symbol in FNO_SYMBOLS or base in FNO_SYMBOLS or f"{base}.NS" in FNO_SYMBOLS
+
+
 # ── Type definitions ─────────────────────────────────────────────────────────
 
 class PortfolioTrade(TypedDict):
@@ -306,8 +313,8 @@ def format_trade_row(t: dict) -> str:
     else:
         date_info = "Added: " + added_date if added_date else ""
     
-    fno_tag = " [F&O]" if t["ticker"] in FNO_SYMBOLS else ""
-    line1 = f"{status_emoji} **{ticker}** [{direction}{fno_tag}]"
+    fno_tag = " [F&O]" if is_fno_symbol(t["ticker"]) else ""
+    line1 = f"{status_emoji} **{ticker}** [{direction}]{fno_tag}"
     line2 = f"```yaml"
     line3 = f"{date_info} | R: {r_str}" if date_info else f"R: {r_str}"
     line4 = f"Current   : {curr_str}"
@@ -417,8 +424,8 @@ def format_signal_for_discord(setup: dict, rank: int) -> str:
     curr_close = setup.get("trend", {}).get("close", t["entry"])
     
     lines = []
-    fno_tag = " [F&O]" if setup["ticker"] in FNO_SYMBOLS else ""
-    lines.append(f"{emoji} **#{rank} {ticker}** [{direction}{fno_tag}]")
+    fno_tag = " [F&O]" if is_fno_symbol(setup["ticker"]) else ""
+    lines.append(f"{emoji} **#{rank} {ticker}** [{direction}]{fno_tag}")
     lines.append(f"```yaml")
     lines.append(f"Added     : {setup.get('signal_date', '')}")
     lines.append(f"Current   : ₹{curr_close:,.0f}")
@@ -572,7 +579,7 @@ def print_trade_card(
     vol_tag     = "Volume OK ✅" if vol["surge_ratio"] >= VOLUME_MIN_RATIO else "Weak Volume ⚠️"
 
     print("=" * width)
-    fno_tag = " [F&O]" if ticker in FNO_SYMBOLS else ""
+    fno_tag = " [F&O]" if is_fno_symbol(ticker) else ""
     print(f"  {label}  —  Rank #{rank}{fno_tag}")
     print(f"  {name}  ({ticker})")
     print("=" * width)
@@ -660,7 +667,7 @@ def print_trade_card_compact(
     upside    = round(float((setup["target"] - setup["entry"]) / setup["entry"] * 100), 2)
 
     print("─" * width)
-    fno_tag = " [F&O]" if ticker in FNO_SYMBOLS else ""
+    fno_tag = " [F&O]" if is_fno_symbol(ticker) else ""
     print(f"  {label}  —  {name}  ({ticker}){fno_tag}")
     print("─" * width)
     print(f"  {'Entry':<14}  Rs. {setup['entry']:>10,.2f}")
@@ -1094,7 +1101,7 @@ def update_portfolio(strategy: str) -> None:
         score_display = f"{t['score']:.0f}" if t.get("score", 0) > 0 else "-"
         ml_prob_val = t.get("ml_prob", 0)
         ml_display = f"{ml_prob_val*100:.0f}%" if ml_prob_val > 0 else "-"
-        fno_tag = " [F&O]" if t["ticker"] in FNO_SYMBOLS else ""
+        fno_tag = " [F&O]" if is_fno_symbol(t["ticker"]) else ""
         print(f"  {t['ticker']:<12} {direction:<5}{fno_tag:<6} {t['status']:<9} {added_date:<11} {trigger_date:<11} {exit_date:<11} {days_str:>4} {t['entry']:>8.2f} {t['stop_loss']:>8.2f} {t['target']:>9.2f} {curr_close:>9.2f} {score_display:>6} {ml_display:>5} {r_display:>4} {status_change}")
         
         if t["status"] != "CLOSED":
@@ -1464,7 +1471,7 @@ def print_trade_card_short(
     vol_tag      = "Volume OK ✅" if vol["surge_ratio"] >= VOLUME_MIN_RATIO else "Weak Volume ⚠️"
 
     print("=" * width)
-    fno_tag = " [F&O]" if ticker in FNO_SYMBOLS else ""
+    fno_tag = " [F&O]" if is_fno_symbol(ticker) else ""
     print(f"  {label}  —  Rank #{rank}  [SHORT]{fno_tag}")
     print(f"  {name}  ({ticker})")
     print("=" * width)
@@ -1550,7 +1557,7 @@ def print_trade_card_compact_short(
     downside = round(float((setup["entry"] - setup["target"]) / setup["entry"] * 100), 2)
 
     print("─" * width)
-    fno_tag = " [F&O]" if ticker in FNO_SYMBOLS else ""
+    fno_tag = " [F&O]" if is_fno_symbol(ticker) else ""
     print(f"  {label}  —  {name}  ({ticker})  [SHORT]{fno_tag}")
     print("─" * width)
     print(f"  {'Entry':<14}  Rs. {setup['entry']:>10,.2f}")

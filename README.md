@@ -1,8 +1,8 @@
 # 📈 NSE India Swing Trading System
 
 > A rule-based, statistically validated swing trading framework for the Indian stock market (NSE).
-> **Last Updated:** 2026-05-07
-> **Version:** 1.17 (IST Timezone Enforcement)
+> **Last Updated:** 2026-06-27
+> **Version:** 1.18 (Discord F&O Tagging)
 
 ---
 
@@ -24,6 +24,7 @@ This repository provides a complete system for finding and backtesting breakout 
 -   **Cost Modeling**: Real-world backtesting including slippage and transaction costs.
 -   **Walk-Forward Validation**: Built-in robustness testing across years of market data.
 -   **Discord Integration**: Auto-posts portfolio + separate long/short signals to Discord.
+-   **Dynamic F&O Tags**: Discord signal and portfolio rows show `[F&O]` using NSE's live F&O list from `nsepython.fnolist()`.
 
 ---
 

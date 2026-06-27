@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.18] - 2026-06-27
+
+### Fixed
+- **Discord F&O Tagging**: Fixed F&O labels for Discord signal and portfolio rows by normalizing NSE symbols from `fnolist()` before comparing them with `.NS` tickers such as `HEROMOTOCO.NS`.
+- **F&O Data Source**: Kept F&O detection dynamic through NSE data (`nsepython.fnolist()`); no local hardcoded F&O stock list is used.
+
 ## [1.17] - 2026-05-07
 
 ### Added

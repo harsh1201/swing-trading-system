@@ -1,7 +1,7 @@
 # AGENTS.md - Swing Trading System Context
 
-> **Last Updated:** 2026-05-07
-> **Version:** 1.17 (IST Timezone Enforcement)
+> **Last Updated:** 2026-06-27
+> **Version:** 1.18 (Discord F&O Tagging)
 > **Maintainer:** Project Owner
 
 
@@ -257,6 +257,7 @@ Portfolio summary auto-posts to Discord when screener runs.
 - Webhook URLs configured in `config/settings.py`
 - Posts full portfolio with all trades (Active, Pending, Closed)
 - Shows Entry, SL, Target, Current Price, R-multiple
+- Shows `[F&O]` tag for F&O-eligible symbols using NSE's live `nsepython.fnolist()` data (no hardcoded local F&O list)
 
 ---
 
@@ -271,6 +272,13 @@ Portfolio summary auto-posts to Discord when screener runs.
 ---
 
 ## Changelog
+
+### 2026-06-27 (v1.18 - Discord F&O Tagging)
+
+### Fixed
+- **Discord F&O tag bug**: Fixed missing `[F&O]` tag for symbols like `HEROMOTOCO.NS` in Discord signal and portfolio rows.
+- **Symbol normalization**: Added F&O matching helper that accepts both raw NSE symbols (`HEROMOTOCO`) and yfinance tickers (`HEROMOTOCO.NS`).
+- **Dynamic F&O source preserved**: F&O tags come from NSE via `nsepython.fnolist()`; no hardcoded local F&O stock list is used.
 
 ### 2026-05-07 (v1.17 - IST Timezone Enforcement)
 

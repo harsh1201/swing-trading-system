@@ -644,6 +644,44 @@ def test_format_signal_for_discord_short():
     assert "180" in result
 
 
+def test_is_fno_symbol_handles_suffix_and_raw(monkeypatch):
+    """Test F&O matching works with raw symbols and .NS tickers."""
+    import screener
+
+    monkeypatch.setattr(screener, "FNO_SYMBOLS", {"HEROMOTOCO.NS", "M&M.NS"})
+
+    assert screener.is_fno_symbol("HEROMOTOCO.NS")
+    assert screener.is_fno_symbol("HEROMOTOCO")
+    assert screener.is_fno_symbol("M&M.NS")
+    assert not screener.is_fno_symbol("NOTFNO.NS")
+
+
+def test_format_signal_for_discord_short_fno_tag(monkeypatch):
+    """Test Discord short signal formatting adds F&O tag."""
+    import screener
+
+    monkeypatch.setattr(screener, "FNO_SYMBOLS", {"HEROMOTOCO.NS"})
+
+    setup = {
+        "ticker": "HEROMOTOCO.NS",
+        "setup": {
+            "entry": 4868.0,
+            "stop_loss": 5073.0,
+            "target": 4458.0,
+            "risk_pct": 4.2,
+        },
+        "score": {"total": 73.7},
+        "strategy": "short_breakout",
+        "signal_date": "25-06-2026",
+        "ml_prob": 0.32,
+    }
+
+    result = screener.format_signal_for_discord(setup, 1)
+
+    assert "**#1 HEROMOTOCO** [SHORT] [F&O]" in result
+    assert "ML Win    : 32%" in result
+
+
 def test_send_signals_to_discord_no_webhook(monkeypatch):
     """Test send_signals_to_discord returns early when no webhook."""
     import screener
