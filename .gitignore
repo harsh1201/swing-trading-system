@@ -7,6 +7,10 @@ storage/
 *.csv
 *.json
 !config/stocks.json  # Keep stock list if it was json, but it's .py here
+# Track the trained ML models — they must travel with every deploy, otherwise the
+# quality gate silently degrades to score-only (see ADR-003 P1).
+!models/
+!models/*.json
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

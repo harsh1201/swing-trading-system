@@ -6,3 +6,5 @@
 | [ADR-TEST-001](TASK-TEST-001_test-architecture.md) | 2026-03-27 | Testing Architecture | Accepted |
 | [ADR-001](TASK-001_discord-routing.md) | 2026-04-23 | Discord Webhook Routing | Implemented |
 | [ADR-002](TASK-002_quality-gate.md) | 2026-07-08 | Signal Quality Gate | Implemented |
+| [ADR-003](TASK-003_reliability-hardening.md) | 2026-07-08 | Reliability Hardening | Implemented |
+| [ADR-004](TASK-004_tracking-loop-correctness.md) | 2026-07-08 | Tracking-Loop Correctness | Implemented |

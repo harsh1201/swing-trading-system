@@ -183,3 +183,36 @@ def test_cache_save_existing_file(monkeypatch, tmp_path):
     
     assert "existing_key" in result
     assert "new_key" in result
+
+
+def test_cache_nan_and_inf_become_null_round_trip(tmp_path):
+    """P1-4: non-finite floats anywhere (incl. inside a list) serialise to null
+    and reload as None — the old str.replace hack missed list NaN."""
+    cache = DataCache(str(tmp_path / "c.json"))
+    cache.save("k", {"scalar": float("nan"),
+                     "vals": [1.0, float("nan"), 3.0],
+                     "big": float("inf")})
+    got = cache.load("k")
+    assert got["scalar"] is None
+    assert got["vals"] == [1.0, None, 3.0]     # NaN inside the list handled
+    assert got["big"] is None
+
+
+def test_cache_write_is_atomic_no_temp_left(tmp_path):
+    """P1-3: a successful save leaves no .tmp files and a valid JSON target."""
+    cache = DataCache(str(tmp_path / "c.json"))
+    cache.save("k", {"a": 1, "b": [1, 2, 3]})
+    leftovers = [f for f in os.listdir(tmp_path) if f.endswith(".tmp")]
+    assert leftovers == []
+    assert cache.load("k") == {"a": 1, "b": [1, 2, 3]}
+
+
+def test_cache_corrupt_file_does_not_raise(tmp_path):
+    """A truncated/corrupt file reads as None rather than crashing the run."""
+    p = tmp_path / "c.json"
+    p.write_text('{"portfolio": {"trades": [')   # truncated mid-write
+    cache = DataCache(str(p))
+    assert cache.load("portfolio") is None
+    # And a subsequent save recovers cleanly (starts fresh).
+    cache.save("portfolio", {"trades": []})
+    assert cache.load("portfolio") == {"trades": []}

@@ -789,3 +789,346 @@ def test_send_signals_to_discord_empty_setups(monkeypatch):
     monkeypatch.setattr(screener, "DISCORD_LONG_SIGNALS_WEBHOOK", "https://example.com/webhook")
     result = send_signals_to_discord([], "long_breakout")
     assert result is None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Quality-gate edge cases (NaN / boundary / negative)
+# ─────────────────────────────────────────────────────────────────────────────
+def test_passes_quality_score_exactly_at_bar():
+    """Score exactly on the bar clears (>=), one below fails."""
+    from config.settings import PORTFOLIO_MIN_SCORE
+    assert passes_quality(PORTFOLIO_MIN_SCORE, 0.60) is True
+    assert passes_quality(PORTFOLIO_MIN_SCORE - 1, 0.60) is False
+
+
+def test_passes_quality_nan_is_treated_as_missing():
+    """A NaN signal (e.g. a bad ML prediction) must not crash and must be
+    treated as 'missing' — the gate falls back to the other signal, never
+    silently passing a NaN through a >= comparison."""
+    nan = float("nan")
+    # NaN ml + strong score → gate on score alone → keep
+    assert passes_quality(80, nan) is True
+    # NaN ml + weak score → fails on score
+    assert passes_quality(10, nan) is False
+    # NaN score + strong ml → gate on ml alone → keep
+    assert passes_quality(nan, 0.90) is True
+    # both NaN → neither judgeable → keep (don't hide blind)
+    assert passes_quality(nan, nan) is True
+
+
+def test_passes_quality_negative_treated_as_missing():
+    """Negative signals are impossible in range but must degrade safely to
+    'missing' rather than being compared against the bar."""
+    assert passes_quality(-5, 0.90) is True    # negative score ignored, gate on ml
+    assert passes_quality(80, -0.1) is True     # negative ml ignored, gate on score
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Win-rate reporting: non-WIN/LOSS outcomes (TRAIL / BREAKEVEN)
+# ─────────────────────────────────────────────────────────────────────────────
+def test_format_portfolio_winrate_excludes_trail_from_denominator():
+    """P4 FIX: win-rate is computed over DECIDED trades (wins + losses). A
+    profitable TRAIL/BREAKEVEN exit is neither, so it must NOT dilute the
+    denominator. 1 WIN + 1 TRAIL → 100.0%, not the old diluted 50.0%."""
+    trades = [
+        {"ticker": "W.NS", "status": "CLOSED", "strategy": "long_breakout",
+         "exit_date": "15-04-2026", "outcome": "WIN", "r_multiple": 2.0},
+        {"ticker": "T.NS", "status": "CLOSED", "strategy": "long_breakout",
+         "exit_date": "15-04-2026", "outcome": "TRAIL", "r_multiple": 1.2},
+    ]
+    result = format_portfolio_for_discord(trades, "long_breakout")
+    assert "Win Rate: **100.0%**" in result
+    # Closed count still reflects all 3 states honestly.
+    assert "Closed: **2**" in result
+
+
+def test_format_portfolio_winrate_with_win_and_loss():
+    """Sanity: a real WIN + LOSS still yields the expected 50%."""
+    trades = [
+        {"ticker": "W.NS", "status": "CLOSED", "strategy": "long_breakout",
+         "exit_date": "15-04-2026", "outcome": "WIN", "r_multiple": 2.0},
+        {"ticker": "L.NS", "status": "CLOSED", "strategy": "long_breakout",
+         "exit_date": "15-04-2026", "outcome": "LOSS", "r_multiple": -1.0},
+    ]
+    result = format_portfolio_for_discord(trades, "long_breakout")
+    assert "Win Rate: **50.0%**" in result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# cleanup_portfolio — malformed dates & un-aging ACTIVE
+# ─────────────────────────────────────────────────────────────────────────────
+def test_cleanup_pending_malformed_date_still_quality_gated():
+    """A PENDING row with an unparseable date_added can't be aged out
+    (days_since=None), but it must still face the quality gate rather than
+    living forever."""
+    trades = [
+        {"ticker": "BADDATE_WEAK.NS", "status": "PENDING", "date_added": "not-a-date",
+         "exit_date": "", "score": 10, "ml_prob": 0.10},
+        {"ticker": "BADDATE_GOOD.NS", "status": "PENDING", "date_added": "not-a-date",
+         "exit_date": "", "score": 70, "ml_prob": 0.60},
+    ]
+    cleaned, stats = cleanup_portfolio(trades)
+    assert stats["pending_low_quality"] == 1
+    assert {t["ticker"] for t in cleaned} == {"BADDATE_GOOD.NS"}
+
+
+def test_cleanup_active_with_trigger_flagged_not_removed():
+    """P3: a triggered ACTIVE position open far beyond MAX_TRIGGERED_ACTIVE_DAYS
+    (likely a dead price feed) is FLAGGED for review but NEVER removed — an open
+    position must not be silently dropped."""
+    from datetime import datetime, timedelta
+    from screener import MAX_TRIGGERED_ACTIVE_DAYS
+    ancient = (datetime.today() - timedelta(days=MAX_TRIGGERED_ACTIVE_DAYS + 500)
+               ).strftime("%d-%m-%Y")
+    trades = [
+        {"ticker": "STUCK.NS", "status": "ACTIVE", "date_added": ancient,
+         "entry_trigger_date": ancient, "exit_date": ""},
+    ]
+    cleaned, stats = cleanup_portfolio(trades)
+    assert stats.get("active_stale", 0) == 0                 # not the never-triggered path
+    assert stats.get("active_stale_triggered", 0) == 1        # flagged
+    assert "STUCK.NS" in stats.get("active_stale_triggered_tickers", [])
+    assert len(cleaned) == 1                                   # still tracked
+
+
+def test_cleanup_active_with_recent_trigger_not_flagged():
+    """A recently-triggered ACTIVE position is neither flagged nor removed."""
+    from datetime import datetime, timedelta
+    recent = (datetime.today() - timedelta(days=3)).strftime("%d-%m-%Y")
+    trades = [
+        {"ticker": "OK.NS", "status": "ACTIVE", "date_added": recent,
+         "entry_trigger_date": recent, "exit_date": ""},
+    ]
+    cleaned, stats = cleanup_portfolio(trades)
+    assert stats.get("active_stale_triggered", 0) == 0
+    assert len(cleaned) == 1
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _recompute_ml_for_trade — guard paths must be silent no-ops, never crash,
+# never corrupt the trade dict (currently wrapped in a bare except).
+# ─────────────────────────────────────────────────────────────────────────────
+def test_recompute_ml_no_models_is_noop():
+    from screener import _recompute_ml_for_trade
+    t = {"strategy": "long_breakout", "ml_prob": 0.55, "ml_r": 2.0}
+    _recompute_ml_for_trade(t, pd.DataFrame(), {})
+    assert t["ml_prob"] == 0.55 and t["ml_r"] == 2.0   # untouched
+
+
+def test_recompute_ml_strategy_absent_is_noop():
+    from screener import _recompute_ml_for_trade
+    t = {"strategy": "short_breakout", "ml_prob": 0.55}
+    # models dict has 'long' only → short lookup misses → no-op
+    _recompute_ml_for_trade(t, pd.DataFrame(), {"long": {"clf": object(), "reg": object()}})
+    assert t["ml_prob"] == 0.55
+
+
+def test_recompute_ml_both_models_none_is_noop():
+    from screener import _recompute_ml_for_trade
+    t = {"strategy": "long_breakout", "ml_prob": 0.55}
+    _recompute_ml_for_trade(t, pd.DataFrame(), {"long": {"clf": None, "reg": None}})
+    assert t["ml_prob"] == 0.55
+
+
+def test_recompute_ml_bad_df_does_not_crash_or_corrupt():
+    """With real models present but a garbage DataFrame, the indicator
+    machinery raises/returns None; _recompute must swallow it and leave the
+    trade's prior ML values intact — never a partial write or an exception."""
+    from screener import _recompute_ml_for_trade
+
+    class _BoomModel:
+        def predict(self, *a, **k):        raise RuntimeError("boom")
+        def predict_proba(self, *a, **k):  raise RuntimeError("boom")
+
+    t = {"strategy": "long_breakout", "ml_prob": 0.55, "ml_r": 2.0}
+    models = {"long": {"clf": _BoomModel(), "reg": _BoomModel()}}
+    _recompute_ml_for_trade(t, pd.DataFrame({"Close": [1.0, 2.0]}), models)
+    assert t["ml_prob"] == 0.55 and t["ml_r"] == 2.0   # unchanged, no raise
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Local rotating portfolio backups (Fly volume) — reversible prunes
+# ─────────────────────────────────────────────────────────────────────────────
+def _temp_cache(tmp_path, monkeypatch):
+    from data.cache import DataCache
+    cache_path = tmp_path / "portfolio.json"
+    monkeypatch.setattr("screener._get_portfolio_cache", lambda: DataCache(str(cache_path)))
+    return cache_path
+
+
+def _set_day(monkeypatch, day_iso):
+    """Force screener.get_now() to a fixed IST date (YYYY-MM-DD)."""
+    import screener, datetime as dt, pytz
+    ist = pytz.timezone("Asia/Kolkata")
+    monkeypatch.setattr(
+        screener, "get_now",
+        lambda: dt.datetime.fromisoformat(day_iso).replace(tzinfo=ist))
+
+
+def test_backup_one_snapshot_per_day_with_rotation(tmp_path, monkeypatch):
+    """Backups are one-per-day (rapid same-day saves collapse), keeping newest N days."""
+    import screener
+    from screener import save_portfolio
+    _temp_cache(tmp_path, monkeypatch)
+    monkeypatch.setattr(screener, "PORTFOLIO_BACKUP_KEEP", 3)
+
+    for i, day in enumerate(["2026-07-01", "2026-07-02", "2026-07-03",
+                             "2026-07-04", "2026-07-05"]):
+        _set_day(monkeypatch, day)
+        save_portfolio([{"ticker": f"T{i}.NS", "status": "PENDING"}])
+        save_portfolio([{"ticker": f"T{i}.NS", "status": "PENDING"}])   # 2nd same-day save
+
+    backups = sorted((tmp_path / "backups").glob("portfolio_*.json"))
+    assert [b.name for b in backups] == [
+        "portfolio_20260703.json", "portfolio_20260704.json", "portfolio_20260705.json"
+    ]   # 5 days collapsed to one file each, rotated to newest 3
+
+
+def test_backup_disabled_when_keep_zero(tmp_path, monkeypatch):
+    import screener
+    from screener import save_portfolio
+    _temp_cache(tmp_path, monkeypatch)
+    monkeypatch.setattr(screener, "PORTFOLIO_BACKUP_KEEP", 0)
+
+    save_portfolio([{"ticker": "X.NS", "status": "PENDING"}])
+    assert not (tmp_path / "backups").exists()   # no backups written
+
+
+def test_restore_rolls_back_to_prior_day(tmp_path, monkeypatch):
+    """A bad prune is reversible: restore a prior day's snapshot from the volume."""
+    from screener import save_portfolio, load_portfolio, restore_portfolio_from_backup
+    _temp_cache(tmp_path, monkeypatch)
+
+    _set_day(monkeypatch, "2026-07-01")
+    save_portfolio([{"ticker": "A.NS", "status": "PENDING"}])
+    _set_day(monkeypatch, "2026-07-02")
+    save_portfolio([{"ticker": "B.NS", "status": "PENDING"}])   # current state = B
+    assert load_portfolio()[0]["ticker"] == "B.NS"
+
+    oldest = sorted((tmp_path / "backups").glob("portfolio_*.json"))[0].name
+    assert restore_portfolio_from_backup(oldest) is True
+    assert load_portfolio()[0]["ticker"] == "A.NS"   # rolled back to A
+
+
+def test_restore_no_backups_returns_false(tmp_path, monkeypatch):
+    from screener import restore_portfolio_from_backup
+    _temp_cache(tmp_path, monkeypatch)
+    assert restore_portfolio_from_backup() is False   # nothing to restore
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# P0-2: _advance_trade walks EVERY bar (not just the latest) so exits on skipped
+# days are caught in chronological order.
+# ─────────────────────────────────────────────────────────────────────────────
+def _bars(rows):
+    """rows: list of (iso_date, high, low). Close defaults to high."""
+    idx = pd.to_datetime([r[0] for r in rows])
+    return pd.DataFrame(
+        {"High": [r[1] for r in rows], "Low": [r[2] for r in rows],
+         "Close": [r[1] for r in rows]}, index=idx)
+
+
+def test_advance_trade_catches_exit_on_earlier_bar():
+    """Target hit on a middle bar; latest bar back below → must still record WIN."""
+    from screener import _advance_trade
+    t = {"strategy": "long_breakout", "status": "ACTIVE", "entry": 100.0,
+         "stop_loss": 95.0, "target": 110.0, "date_added": "01-06-2026",
+         "entry_trigger_date": "02-06-2026", "exit_date": "", "r_multiple": 0.0}
+    df = _bars([("2026-06-03", 105, 101), ("2026-06-04", 112, 104), ("2026-06-05", 106, 102)])
+    _advance_trade(t, df)
+    assert t["status"] == "CLOSED" and t["outcome"] == "WIN"
+    assert t["exit_date"] == "04-06-2026" and t["r_multiple"] == 2.0
+
+
+def test_advance_trade_sl_before_target_same_bar():
+    """A bar that spans both SL and target records the conservative LOSS."""
+    from screener import _advance_trade
+    t = {"strategy": "long_breakout", "status": "ACTIVE", "entry": 100.0,
+         "stop_loss": 95.0, "target": 110.0, "date_added": "01-06-2026",
+         "entry_trigger_date": "02-06-2026", "exit_date": "", "r_multiple": 0.0}
+    df = _bars([("2026-06-03", 112, 94)])   # high>=target AND low<=sl
+    _advance_trade(t, df)
+    assert t["status"] == "CLOSED" and t["outcome"] == "LOSS"
+
+
+def test_advance_trade_pending_triggers_then_same_bar_sl():
+    """PENDING can trigger and stop out on the same bar."""
+    from screener import _advance_trade
+    t = {"strategy": "long_breakout", "status": "PENDING", "entry": 100.0,
+         "stop_loss": 95.0, "target": 110.0, "date_added": "01-06-2026",
+         "entry_trigger_date": "", "exit_date": "", "r_multiple": 0.0}
+    df = _bars([("2026-06-02", 101, 94)])   # triggers (high>=100) then SL (low<=95)
+    _advance_trade(t, df)
+    assert t["status"] == "CLOSED" and t["outcome"] == "LOSS"
+    assert t["entry_trigger_date"] == "02-06-2026"
+
+
+def test_advance_trade_ignores_bars_before_trigger():
+    """An SL-breaching bar BEFORE the trigger date must not close the trade."""
+    from screener import _advance_trade
+    t = {"strategy": "long_breakout", "status": "ACTIVE", "entry": 100.0,
+         "stop_loss": 95.0, "target": 110.0, "date_added": "03-06-2026",
+         "entry_trigger_date": "04-06-2026", "exit_date": "", "r_multiple": 0.0}
+    # 03-Jun low 90 (<=sl) but predates the 04-Jun trigger → must be ignored.
+    df = _bars([("2026-06-03", 98, 90), ("2026-06-04", 105, 101), ("2026-06-05", 107, 103)])
+    _advance_trade(t, df)
+    assert t["status"] == "ACTIVE"   # never closed on the pre-trigger bar
+
+
+def test_advance_trade_short_target():
+    """Short trade wins when price falls to target."""
+    from screener import _advance_trade
+    t = {"strategy": "short_breakout", "status": "ACTIVE", "entry": 100.0,
+         "stop_loss": 105.0, "target": 90.0, "date_added": "01-06-2026",
+         "entry_trigger_date": "02-06-2026", "exit_date": "", "r_multiple": 0.0}
+    df = _bars([("2026-06-03", 99, 88)])   # low<=target
+    _advance_trade(t, df)
+    assert t["status"] == "CLOSED" and t["outcome"] == "WIN" and t["r_multiple"] == 2.0
+
+
+def test_advance_trade_no_exit_stays_active():
+    from screener import _advance_trade
+    t = {"strategy": "long_breakout", "status": "ACTIVE", "entry": 100.0,
+         "stop_loss": 95.0, "target": 110.0, "date_added": "01-06-2026",
+         "entry_trigger_date": "02-06-2026", "exit_date": "", "r_multiple": 0.0}
+    df = _bars([("2026-06-03", 108, 97), ("2026-06-04", 109, 98)])   # never hits 110 or 95
+    sc, ep = _advance_trade(t, df)
+    assert t["status"] == "ACTIVE" and ep is None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# P0-1: update_portfolio must PERSIST closed trades (they used to be dropped).
+# ─────────────────────────────────────────────────────────────────────────────
+def test_update_portfolio_persists_closed_trades(tmp_path, monkeypatch):
+    import screener
+    from data.cache import DataCache
+    from datetime import datetime, timedelta
+    recent_exit = (datetime.today() - timedelta(days=3)).strftime("%d-%m-%Y")  # < CLOSED_CLEANUP_DAYS
+
+    cache = DataCache(str(tmp_path / "portfolio.json"))
+    cache.save("portfolio", {"trades": [
+        {"ticker": "CLOSEDWIN.NS", "name": "c", "strategy": "long_breakout",
+         "status": "CLOSED", "entry": 100, "stop_loss": 95, "target": 110,
+         "date_added": "01-07-2026", "entry_trigger_date": "02-07-2026",
+         "exit_date": recent_exit, "outcome": "WIN", "r_multiple": 2.0,
+         "current_price": 110, "score": 60, "ml_prob": 0.5, "ml_r": 2.0},
+        {"ticker": "PEND.NS", "name": "p", "strategy": "long_breakout",
+         "status": "PENDING", "entry": 500, "stop_loss": 480, "target": 540,
+         "date_added": datetime.today().strftime("%d-%m-%Y"), "entry_trigger_date": "",
+         "exit_date": "", "outcome": "", "r_multiple": 0.0, "current_price": 90,
+         "score": 60, "ml_prob": 0.5, "ml_r": 2.0},
+    ]})
+    monkeypatch.setattr("screener._get_portfolio_cache", lambda: cache)
+    monkeypatch.setattr(screener, "XGB_AVAILABLE", False)
+    monkeypatch.setattr("screener.is_fno_symbol", lambda *a, **k: False)
+    monkeypatch.setattr("screener.add_indicators", lambda x: x)
+    dates = pd.date_range("2026-06-20", periods=30)
+    df = pd.DataFrame({"Open": [90.0] * 30, "High": [92.0] * 30, "Low": [88.0] * 30,
+                       "Close": [90.0] * 30, "Volume": [1000] * 30}, index=dates)
+    monkeypatch.setattr("screener.fetch_ohlcv", lambda *a, **k: df.copy())
+
+    screener.update_portfolio("long_breakout")
+
+    after = {t["ticker"] for t in cache.load("portfolio")["trades"]}
+    assert "CLOSEDWIN.NS" in after   # closed win (3d old) survived the run
+    assert "PEND.NS" in after
