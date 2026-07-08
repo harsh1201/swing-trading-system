@@ -789,3 +789,129 @@ def test_send_signals_to_discord_empty_setups(monkeypatch):
     monkeypatch.setattr(screener, "DISCORD_LONG_SIGNALS_WEBHOOK", "https://example.com/webhook")
     result = send_signals_to_discord([], "long_breakout")
     assert result is None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Quality-gate edge cases (NaN / boundary / negative)
+# ─────────────────────────────────────────────────────────────────────────────
+def test_passes_quality_score_exactly_at_bar():
+    """Score exactly on the bar clears (>=), one below fails."""
+    from config.settings import PORTFOLIO_MIN_SCORE
+    assert passes_quality(PORTFOLIO_MIN_SCORE, 0.60) is True
+    assert passes_quality(PORTFOLIO_MIN_SCORE - 1, 0.60) is False
+
+
+def test_passes_quality_nan_is_treated_as_missing():
+    """A NaN signal (e.g. a bad ML prediction) must not crash and must be
+    treated as 'missing' — the gate falls back to the other signal, never
+    silently passing a NaN through a >= comparison."""
+    nan = float("nan")
+    # NaN ml + strong score → gate on score alone → keep
+    assert passes_quality(80, nan) is True
+    # NaN ml + weak score → fails on score
+    assert passes_quality(10, nan) is False
+    # NaN score + strong ml → gate on ml alone → keep
+    assert passes_quality(nan, 0.90) is True
+    # both NaN → neither judgeable → keep (don't hide blind)
+    assert passes_quality(nan, nan) is True
+
+
+def test_passes_quality_negative_treated_as_missing():
+    """Negative signals are impossible in range but must degrade safely to
+    'missing' rather than being compared against the bar."""
+    assert passes_quality(-5, 0.90) is True    # negative score ignored, gate on ml
+    assert passes_quality(80, -0.1) is True     # negative ml ignored, gate on score
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Win-rate reporting: non-WIN/LOSS outcomes (TRAIL / BREAKEVEN)
+# ─────────────────────────────────────────────────────────────────────────────
+def test_format_portfolio_winrate_excludes_trail_from_numerator():
+    """RED FLAG DOC: a TRAIL/BREAKEVEN exit counts in the closed total but is
+    neither a WIN nor a LOSS. Win-rate = wins / total_closed, so a profitable
+    TRAIL exit drags the reported win-rate down. This test pins the CURRENT
+    behaviour so a future fix (e.g. wins / (wins+losses)) is a conscious change."""
+    trades = [
+        {"ticker": "W.NS", "status": "CLOSED", "strategy": "long_breakout",
+         "exit_date": "15-04-2026", "outcome": "WIN", "r_multiple": 2.0},
+        {"ticker": "T.NS", "status": "CLOSED", "strategy": "long_breakout",
+         "exit_date": "15-04-2026", "outcome": "TRAIL", "r_multiple": 1.2},
+    ]
+    result = format_portfolio_for_discord(trades, "long_breakout")
+    # 1 win of 2 closed → 50.0%, NOT 100%. Documents the dilution.
+    assert "Win Rate: **50.0%**" in result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# cleanup_portfolio — malformed dates & un-aging ACTIVE
+# ─────────────────────────────────────────────────────────────────────────────
+def test_cleanup_pending_malformed_date_still_quality_gated():
+    """A PENDING row with an unparseable date_added can't be aged out
+    (days_since=None), but it must still face the quality gate rather than
+    living forever."""
+    trades = [
+        {"ticker": "BADDATE_WEAK.NS", "status": "PENDING", "date_added": "not-a-date",
+         "exit_date": "", "score": 10, "ml_prob": 0.10},
+        {"ticker": "BADDATE_GOOD.NS", "status": "PENDING", "date_added": "not-a-date",
+         "exit_date": "", "score": 70, "ml_prob": 0.60},
+    ]
+    cleaned, stats = cleanup_portfolio(trades)
+    assert stats["pending_low_quality"] == 1
+    assert {t["ticker"] for t in cleaned} == {"BADDATE_GOOD.NS"}
+
+
+def test_cleanup_active_with_trigger_never_aged():
+    """RED FLAG DOC: an ACTIVE trade that HAS a trigger date is never aged out,
+    no matter how old. If its price feed dies (delist/halt) it is tracked
+    forever. Pins current behaviour."""
+    from datetime import datetime, timedelta
+    ancient = (datetime.today() - timedelta(days=999)).strftime("%d-%m-%Y")
+    trades = [
+        {"ticker": "STUCK.NS", "status": "ACTIVE", "date_added": ancient,
+         "entry_trigger_date": ancient, "exit_date": ""},
+    ]
+    cleaned, stats = cleanup_portfolio(trades)
+    assert stats.get("active_stale", 0) == 0
+    assert len(cleaned) == 1
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _recompute_ml_for_trade — guard paths must be silent no-ops, never crash,
+# never corrupt the trade dict (currently wrapped in a bare except).
+# ─────────────────────────────────────────────────────────────────────────────
+def test_recompute_ml_no_models_is_noop():
+    from screener import _recompute_ml_for_trade
+    t = {"strategy": "long_breakout", "ml_prob": 0.55, "ml_r": 2.0}
+    _recompute_ml_for_trade(t, pd.DataFrame(), {})
+    assert t["ml_prob"] == 0.55 and t["ml_r"] == 2.0   # untouched
+
+
+def test_recompute_ml_strategy_absent_is_noop():
+    from screener import _recompute_ml_for_trade
+    t = {"strategy": "short_breakout", "ml_prob": 0.55}
+    # models dict has 'long' only → short lookup misses → no-op
+    _recompute_ml_for_trade(t, pd.DataFrame(), {"long": {"clf": object(), "reg": object()}})
+    assert t["ml_prob"] == 0.55
+
+
+def test_recompute_ml_both_models_none_is_noop():
+    from screener import _recompute_ml_for_trade
+    t = {"strategy": "long_breakout", "ml_prob": 0.55}
+    _recompute_ml_for_trade(t, pd.DataFrame(), {"long": {"clf": None, "reg": None}})
+    assert t["ml_prob"] == 0.55
+
+
+def test_recompute_ml_bad_df_does_not_crash_or_corrupt():
+    """With real models present but a garbage DataFrame, the indicator
+    machinery raises/returns None; _recompute must swallow it and leave the
+    trade's prior ML values intact — never a partial write or an exception."""
+    from screener import _recompute_ml_for_trade
+
+    class _BoomModel:
+        def predict(self, *a, **k):        raise RuntimeError("boom")
+        def predict_proba(self, *a, **k):  raise RuntimeError("boom")
+
+    t = {"strategy": "long_breakout", "ml_prob": 0.55, "ml_r": 2.0}
+    models = {"long": {"clf": _BoomModel(), "reg": _BoomModel()}}
+    _recompute_ml_for_trade(t, pd.DataFrame({"Close": [1.0, 2.0]}), models)
+    assert t["ml_prob"] == 0.55 and t["ml_r"] == 2.0   # unchanged, no raise
