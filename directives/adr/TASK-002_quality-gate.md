@@ -17,8 +17,11 @@ one pair of config knobs:
    - Both signals present → require `score ≥ PORTFOLIO_MIN_SCORE` **AND** `ml_prob ≥ PORTFOLIO_MIN_ML`.
    - Only one present → gate on whichever is available.
    - Neither present → keep (can't judge — don't hide blind).
-2. **Config** (`config/settings.py`): `PORTFOLIO_MIN_SCORE = 50`, `PORTFOLIO_MIN_ML = 0.40`.
+2. **Config** (`config/settings.py`): `PORTFOLIO_MIN_SCORE = 50`, `PORTFOLIO_MIN_ML = 0.45`.
    Equal trust in both signals; thresholds tunable without code change.
+   `PORTFOLIO_MIN_ML` was raised 0.40 → 0.45 (2026-07-08) for a ~10pt cushion over the
+   2R breakeven win-rate (~35%), absorbing XGBoost over-confidence. `XGB_CLF_THRESHOLD`
+   now aliases `PORTFOLIO_MIN_ML` so the two ML bars stay locked in step.
 3. **Three application points:**
    - **Entry gate** — `add_to_portfolio()` rejects sub-gate setups so the portfolio stops
      accumulating low-conviction names (single choke point for long + short).

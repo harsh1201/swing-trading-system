@@ -110,7 +110,9 @@ MIN_SCORE_THRESHOLD = 0       # skip candidates scoring below this (0 = no filte
 # gate on whichever is available; if neither is available, keep it (can't judge
 # — don't hide blind).
 PORTFOLIO_MIN_SCORE = 50      # min setup score (0-100)
-PORTFOLIO_MIN_ML    = 0.40    # min ML win probability (0-1)
+PORTFOLIO_MIN_ML    = 0.45    # min ML win probability (0-1)
+                              # 0.45 = ~10pt cushion over the 2R breakeven (~35%),
+                              # absorbs XGBoost over-confidence; err toward conviction.
 
 # ── Future safeguards (not yet enforced) ──────────────────────────────────────
 MIN_AVG_VOLUME      = 0       # reserved — use MIN_AVG_TURNOVER instead
@@ -136,7 +138,8 @@ XGB_FEATURE_NAMES   = [
 # ── XGBoost Entry Classifier (probability of hitting target) ───────────────────
 USE_XGBOOST_CLASSIFIER = True    # Toggle: use ML win-probability for ranking
 XGB_CLF_MODEL_PATH     = "models/xgb_classifier_{strategy}.json"
-XGB_CLF_THRESHOLD      = 0.45    # Min win-probability to consider a trade
+XGB_CLF_THRESHOLD      = PORTFOLIO_MIN_ML   # keep in lock-step with the portfolio gate
+                                            # (single source of truth = PORTFOLIO_MIN_ML above)
 
 # ── Data-fetching windows ──────────────────────────────────────────────────────
 SCREENER_DAYS        = 420    # calendar days for screener (~14 months)
