@@ -838,19 +838,23 @@ def _portfolio_backup_dir(portfolio_path: str) -> str:
 
 def _backup_portfolio_file(portfolio_path: str) -> None:
     """Copy the freshly-saved portfolio.json into a rotating backups/ folder on
-    the same volume, keeping only the newest PORTFOLIO_BACKUP_KEEP versions.
+    the same volume, keeping the newest PORTFOLIO_BACKUP_KEEP **daily** snapshots.
 
-    This makes cleanups/prunes reversible (restore an earlier snapshot). Fully
-    local — no external service. Best-effort: never raises into the caller, since
-    the authoritative save already succeeded before this runs.
+    One file per calendar day (later saves that day overwrite it), so the many
+    rapid saves during a single screener scan can't evict older history — you keep
+    ~PORTFOLIO_BACKUP_KEEP days of rollback, not N saves from one run.
+
+    Makes cleanups/prunes reversible. Fully local — no external service.
+    Best-effort: never raises into the caller (the authoritative save already
+    succeeded before this runs).
     """
     if PORTFOLIO_BACKUP_KEEP <= 0 or not os.path.exists(portfolio_path):
         return
     try:
         backup_dir = _portfolio_backup_dir(portfolio_path)
         os.makedirs(backup_dir, exist_ok=True)
-        ts = get_now().strftime("%Y%m%d_%H%M%S_%f")
-        shutil.copy2(portfolio_path, os.path.join(backup_dir, f"portfolio_{ts}.json"))
+        day = get_now().strftime("%Y%m%d")
+        shutil.copy2(portfolio_path, os.path.join(backup_dir, f"portfolio_{day}.json"))
         # Rotate — filenames sort chronologically, so drop everything but the tail.
         backups = sorted(
             f for f in os.listdir(backup_dir)
@@ -1059,6 +1063,79 @@ def _recompute_ml_for_trade(t: dict, df: pd.DataFrame, ml_models: dict) -> None:
         print(f"  [!] ML recompute skipped for {t.get('ticker', '?')}: {e}")
 
 
+def _parse_ddmmyyyy(date_str: str):
+    """Parse DD-MM-YYYY to a date, or None if empty/invalid."""
+    if not date_str:
+        return None
+    try:
+        return datetime.strptime(date_str, "%d-%m-%Y").date()
+    except (ValueError, TypeError):
+        return None
+
+
+def _advance_trade(t: dict, df: pd.DataFrame) -> tuple[str, float | None]:
+    """Advance a trade's PENDING→ACTIVE→CLOSED state across EVERY bar in `df`,
+    in chronological order, honouring the trade's own start dates.
+
+    Fixes single-bar blindness: the previous code looked only at the latest bar,
+    so if the scheduled job skipped days (weekends/holidays/failed runs) an exit
+    that happened on an intervening bar was missed — and a trade that had already
+    hit its target could later be mis-recorded as a LOSS. Walking the bars catches
+    the *first* exit chronologically.
+
+    Mutates `t`; returns (status_change, exit_price_or_None). SL is checked before
+    target within a bar (conservative — worst case assumed on an ambiguous bar).
+    """
+    strat = t["strategy"]
+    added = _parse_ddmmyyyy(t.get("date_added", ""))
+    status_change = ""
+    exit_price: float | None = None
+
+    for ts, row in df.iterrows():
+        bar_date = ts.date() if hasattr(ts, "date") else None
+        try:
+            hi = float(row["High"]); lo = float(row["Low"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if hi != hi or lo != lo:   # skip NaN warmup bars
+            continue
+
+        # PENDING → ACTIVE (only on bars from the day the setup was added onward)
+        if t["status"] == "PENDING":
+            if added is not None and bar_date is not None and bar_date < added:
+                continue
+            triggered = ((strat == "long_breakout"  and hi >= t["entry"]) or
+                         (strat == "short_breakout" and lo <= t["entry"]))
+            if triggered:
+                t["status"] = "ACTIVE"
+                t["entry_trigger_date"] = ts.strftime("%d-%m-%Y")
+                status_change = "→ TRIGGERED"
+            # fall through so a same-bar SL/target can also register
+
+        # ACTIVE → CLOSED (only on bars from the trigger day onward)
+        if t["status"] == "ACTIVE":
+            trig = _parse_ddmmyyyy(t.get("entry_trigger_date", ""))
+            if trig is not None and bar_date is not None and bar_date < trig:
+                continue
+            if strat == "long_breakout":
+                if lo <= t["stop_loss"]:
+                    t["status"] = "CLOSED"; t["outcome"] = "LOSS"; exit_price = t["stop_loss"]; status_change = "→ SL HIT"
+                elif hi >= t["target"]:
+                    t["status"] = "CLOSED"; t["outcome"] = "WIN"; exit_price = t["target"]; status_change = "→ TARGET HIT"
+            else:  # short_breakout
+                if hi >= t["stop_loss"]:
+                    t["status"] = "CLOSED"; t["outcome"] = "LOSS"; exit_price = t["stop_loss"]; status_change = "→ SL HIT"
+                elif lo <= t["target"]:
+                    t["status"] = "CLOSED"; t["outcome"] = "WIN"; exit_price = t["target"]; status_change = "→ TARGET HIT"
+            if exit_price is not None:
+                t["exit_date"] = ts.strftime("%d-%m-%Y")
+                t["r_multiple"] = round(
+                    _calculate_r_multiple(strat, t["entry"], exit_price, t["stop_loss"]), 2)
+                break   # trade is done — stop scanning further bars
+
+    return status_change, exit_price
+
+
 def update_portfolio(strategy: str) -> None:
     """
     Fetch latest prices for all tracked trades and update their status.
@@ -1198,59 +1275,25 @@ def update_portfolio(strategy: str) -> None:
         
         days_str = str(days_since) if days_since is not None else "-"
         
-        if t["status"] == "PENDING":
-            if t["strategy"] == "long_breakout":
-                if curr_high >= t["entry"]:
-                    t["status"] = "ACTIVE"
-                    t["entry_trigger_date"] = df.index[-1].strftime("%d-%m-%Y")
-                    trigger_date = t["entry_trigger_date"]
-                    status_change = "→ TRIGGERED"
-            elif t["strategy"] == "short_breakout":
-                if curr_low <= t["entry"]:
-                    t["status"] = "ACTIVE"
-                    t["entry_trigger_date"] = df.index[-1].strftime("%d-%m-%Y")
-                    trigger_date = t["entry_trigger_date"]
-                    status_change = "→ TRIGGERED"
-        
-        exit_price = None
-        if t["status"] == "ACTIVE":
-            if t["strategy"] == "long_breakout":
-                if curr_low <= t["stop_loss"]:
-                    t["status"] = "CLOSED"
-                    t["outcome"] = "LOSS"
-                    exit_price = t["stop_loss"]
-                    status_change = "→ SL HIT"
-                elif curr_high >= t["target"]:
-                    t["status"] = "CLOSED"
-                    t["outcome"] = "WIN"
-                    exit_price = t["target"]
-                    status_change = "→ TARGET HIT"
-            elif t["strategy"] == "short_breakout":
-                if curr_high >= t["stop_loss"]:
-                    t["status"] = "CLOSED"
-                    t["outcome"] = "LOSS"
-                    exit_price = t["stop_loss"]
-                    status_change = "→ SL HIT"
-                elif curr_low <= t["target"]:
-                    t["status"] = "CLOSED"
-                    t["outcome"] = "WIN"
-                    exit_price = t["target"]
-                    status_change = "→ TARGET HIT"
-            
-            if exit_price is not None:
-                t["exit_date"] = df.index[-1].strftime("%d-%m-%Y")
-                exit_date = t["exit_date"]
-                t["r_multiple"] = round(_calculate_r_multiple(t["strategy"], t["entry"], exit_price, t["stop_loss"]), 2)
-                r_display = f"{t['r_multiple']:.2f}"
+        # Advance the trade across every fetched bar (not just the latest), so an
+        # exit on a day the job skipped is still caught in the right order.
+        status_change, exit_price = _advance_trade(t, df)
+        # Refresh display fields after the state machine may have mutated them.
+        trigger_date = t.get("entry_trigger_date", "") or "-"
+        exit_date = t.get("exit_date", "") or "-"
+        if t["r_multiple"] != 0:
+            r_display = f"{t['r_multiple']:.2f}"
 
         score_display = f"{t['score']:.0f}" if t.get("score", 0) > 0 else "-"
         ml_prob_val = t.get("ml_prob", 0)
         ml_display = f"{ml_prob_val*100:.0f}%" if ml_prob_val > 0 else "-"
         fno_tag = " [F&O]" if is_fno_symbol(t["ticker"]) else ""
         print(f"  {t['ticker']:<12} {direction:<5}{fno_tag:<6} {t['status']:<9} {added_date:<11} {trigger_date:<11} {exit_date:<11} {days_str:>4} {t['entry']:>8.2f} {t['stop_loss']:>8.2f} {t['target']:>9.2f} {curr_close:>9.2f} {score_display:>6} {ml_display:>5} {r_display:>4} {status_change}")
-        
-        if t["status"] != "CLOSED":
-            updated_trades.append(t)
+
+        # Keep ALL trades — including freshly CLOSED ones — so the win/loss record
+        # actually persists. cleanup_portfolio() ages CLOSED out after
+        # CLOSED_CLEANUP_DAYS on subsequent runs.
+        updated_trades.append(t)
 
     save_portfolio(updated_trades)
     print("=" * 90 + "\n")

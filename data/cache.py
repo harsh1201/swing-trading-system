@@ -99,6 +99,26 @@ def fetch_ohlcv(
     return df
 
 import json
+import math
+import tempfile
+
+
+def _json_safe(obj):
+    """Recursively make a structure strictly JSON-valid.
+
+    Converts non-finite floats (NaN/inf) — anywhere, including inside lists — to
+    None, and normalises float subclasses (e.g. numpy float64) to native floats.
+    Replaces the old fragile `str.replace(": NaN", ": null")`, which missed NaN
+    inside arrays and could silently corrupt the whole file on reload.
+    """
+    if isinstance(obj, float):
+        return float(obj) if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    return obj
+
 
 class DataCache:
     def __init__(self, filepath: str):
@@ -110,16 +130,26 @@ class DataCache:
                 cache_data = json.load(f)
         except (FileNotFoundError, json.JSONDecodeError):
             cache_data = {}
-        
+
         cache_data[key] = data
-        with open(self.filepath, 'w') as f:
-            # allow_nan=False will raise an error if NaN is found, 
-            # but it's better to clean the data first or use a custom encoder.
-            # For simplicity, we'll use a hack to ensure valid JSON.
-            json_str = json.dumps(cache_data, allow_nan=True)
-            # Replace literal NaN with null
-            json_str = json_str.replace(": NaN", ": null")
-            f.write(json_str)
+        json_str = json.dumps(_json_safe(cache_data), allow_nan=False)
+
+        # Atomic write: serialise to a temp file in the same directory, then
+        # os.replace() over the target. A crash mid-write can no longer truncate
+        # the real file — the rename is atomic, so readers see old-or-new, never
+        # a half-written portfolio.
+        dir_ = os.path.dirname(self.filepath) or "."
+        fd, tmp = tempfile.mkstemp(dir=dir_, suffix=".tmp")
+        try:
+            with os.fdopen(fd, 'w') as f:
+                f.write(json_str)
+            os.replace(tmp, self.filepath)
+        except Exception:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            raise
 
     def load(self, key: str) -> dict | None:
         try:
