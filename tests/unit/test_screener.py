@@ -826,11 +826,10 @@ def test_passes_quality_negative_treated_as_missing():
 # ─────────────────────────────────────────────────────────────────────────────
 # Win-rate reporting: non-WIN/LOSS outcomes (TRAIL / BREAKEVEN)
 # ─────────────────────────────────────────────────────────────────────────────
-def test_format_portfolio_winrate_excludes_trail_from_numerator():
-    """RED FLAG DOC: a TRAIL/BREAKEVEN exit counts in the closed total but is
-    neither a WIN nor a LOSS. Win-rate = wins / total_closed, so a profitable
-    TRAIL exit drags the reported win-rate down. This test pins the CURRENT
-    behaviour so a future fix (e.g. wins / (wins+losses)) is a conscious change."""
+def test_format_portfolio_winrate_excludes_trail_from_denominator():
+    """P4 FIX: win-rate is computed over DECIDED trades (wins + losses). A
+    profitable TRAIL/BREAKEVEN exit is neither, so it must NOT dilute the
+    denominator. 1 WIN + 1 TRAIL → 100.0%, not the old diluted 50.0%."""
     trades = [
         {"ticker": "W.NS", "status": "CLOSED", "strategy": "long_breakout",
          "exit_date": "15-04-2026", "outcome": "WIN", "r_multiple": 2.0},
@@ -838,7 +837,20 @@ def test_format_portfolio_winrate_excludes_trail_from_numerator():
          "exit_date": "15-04-2026", "outcome": "TRAIL", "r_multiple": 1.2},
     ]
     result = format_portfolio_for_discord(trades, "long_breakout")
-    # 1 win of 2 closed → 50.0%, NOT 100%. Documents the dilution.
+    assert "Win Rate: **100.0%**" in result
+    # Closed count still reflects all 3 states honestly.
+    assert "Closed: **2**" in result
+
+
+def test_format_portfolio_winrate_with_win_and_loss():
+    """Sanity: a real WIN + LOSS still yields the expected 50%."""
+    trades = [
+        {"ticker": "W.NS", "status": "CLOSED", "strategy": "long_breakout",
+         "exit_date": "15-04-2026", "outcome": "WIN", "r_multiple": 2.0},
+        {"ticker": "L.NS", "status": "CLOSED", "strategy": "long_breakout",
+         "exit_date": "15-04-2026", "outcome": "LOSS", "r_multiple": -1.0},
+    ]
+    result = format_portfolio_for_discord(trades, "long_breakout")
     assert "Win Rate: **50.0%**" in result
 
 
@@ -860,18 +872,35 @@ def test_cleanup_pending_malformed_date_still_quality_gated():
     assert {t["ticker"] for t in cleaned} == {"BADDATE_GOOD.NS"}
 
 
-def test_cleanup_active_with_trigger_never_aged():
-    """RED FLAG DOC: an ACTIVE trade that HAS a trigger date is never aged out,
-    no matter how old. If its price feed dies (delist/halt) it is tracked
-    forever. Pins current behaviour."""
+def test_cleanup_active_with_trigger_flagged_not_removed():
+    """P3: a triggered ACTIVE position open far beyond MAX_TRIGGERED_ACTIVE_DAYS
+    (likely a dead price feed) is FLAGGED for review but NEVER removed — an open
+    position must not be silently dropped."""
     from datetime import datetime, timedelta
-    ancient = (datetime.today() - timedelta(days=999)).strftime("%d-%m-%Y")
+    from screener import MAX_TRIGGERED_ACTIVE_DAYS
+    ancient = (datetime.today() - timedelta(days=MAX_TRIGGERED_ACTIVE_DAYS + 500)
+               ).strftime("%d-%m-%Y")
     trades = [
         {"ticker": "STUCK.NS", "status": "ACTIVE", "date_added": ancient,
          "entry_trigger_date": ancient, "exit_date": ""},
     ]
     cleaned, stats = cleanup_portfolio(trades)
-    assert stats.get("active_stale", 0) == 0
+    assert stats.get("active_stale", 0) == 0                 # not the never-triggered path
+    assert stats.get("active_stale_triggered", 0) == 1        # flagged
+    assert "STUCK.NS" in stats.get("active_stale_triggered_tickers", [])
+    assert len(cleaned) == 1                                   # still tracked
+
+
+def test_cleanup_active_with_recent_trigger_not_flagged():
+    """A recently-triggered ACTIVE position is neither flagged nor removed."""
+    from datetime import datetime, timedelta
+    recent = (datetime.today() - timedelta(days=3)).strftime("%d-%m-%Y")
+    trades = [
+        {"ticker": "OK.NS", "status": "ACTIVE", "date_added": recent,
+         "entry_trigger_date": recent, "exit_date": ""},
+    ]
+    cleaned, stats = cleanup_portfolio(trades)
+    assert stats.get("active_stale_triggered", 0) == 0
     assert len(cleaned) == 1
 
 
@@ -915,3 +944,60 @@ def test_recompute_ml_bad_df_does_not_crash_or_corrupt():
     models = {"long": {"clf": _BoomModel(), "reg": _BoomModel()}}
     _recompute_ml_for_trade(t, pd.DataFrame({"Close": [1.0, 2.0]}), models)
     assert t["ml_prob"] == 0.55 and t["ml_r"] == 2.0   # unchanged, no raise
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Local rotating portfolio backups (Fly volume) — reversible prunes
+# ─────────────────────────────────────────────────────────────────────────────
+def _temp_cache(tmp_path, monkeypatch):
+    from data.cache import DataCache
+    cache_path = tmp_path / "portfolio.json"
+    monkeypatch.setattr("screener._get_portfolio_cache", lambda: DataCache(str(cache_path)))
+    return cache_path
+
+
+def test_save_portfolio_creates_rotating_backup(tmp_path, monkeypatch):
+    """Each save drops a timestamped backup; rotation keeps only the newest N."""
+    import time, screener
+    from screener import save_portfolio
+    _temp_cache(tmp_path, monkeypatch)
+    monkeypatch.setattr(screener, "PORTFOLIO_BACKUP_KEEP", 3)
+
+    for i in range(5):
+        save_portfolio([{"ticker": f"T{i}.NS", "status": "PENDING"}])
+        time.sleep(0.005)   # distinct microsecond timestamps
+
+    backups = sorted((tmp_path / "backups").glob("portfolio_*.json"))
+    assert len(backups) == 3   # 5 saves rotated down to newest 3
+
+
+def test_backup_disabled_when_keep_zero(tmp_path, monkeypatch):
+    import screener
+    from screener import save_portfolio
+    _temp_cache(tmp_path, monkeypatch)
+    monkeypatch.setattr(screener, "PORTFOLIO_BACKUP_KEEP", 0)
+
+    save_portfolio([{"ticker": "X.NS", "status": "PENDING"}])
+    assert not (tmp_path / "backups").exists()   # no backups written
+
+
+def test_restore_portfolio_from_backup(tmp_path, monkeypatch):
+    """A bad prune is reversible: restore an earlier snapshot from the volume."""
+    import time
+    from screener import save_portfolio, load_portfolio, restore_portfolio_from_backup
+    _temp_cache(tmp_path, monkeypatch)
+
+    save_portfolio([{"ticker": "A.NS", "status": "PENDING"}])
+    time.sleep(0.005)
+    save_portfolio([{"ticker": "B.NS", "status": "PENDING"}])   # current state = B
+    assert load_portfolio()[0]["ticker"] == "B.NS"
+
+    oldest = sorted((tmp_path / "backups").glob("portfolio_*.json"))[0].name
+    assert restore_portfolio_from_backup(oldest) is True
+    assert load_portfolio()[0]["ticker"] == "A.NS"   # rolled back to A
+
+
+def test_restore_no_backups_returns_false(tmp_path, monkeypatch):
+    from screener import restore_portfolio_from_backup
+    _temp_cache(tmp_path, monkeypatch)
+    assert restore_portfolio_from_backup() is False   # nothing to restore

@@ -65,6 +65,10 @@ WALK_FORWARD_SPLIT_YEAR = 2023   # trades before year → in-sample (train)
 PENDING_EXPIRY_DAYS = 5    # Remove PENDING trades after this many days
 CLOSED_CLEANUP_DAYS = 15   # Remove CLOSED trades after this many days
 MAX_ACTIVE_DAYS = 30       # Remove stale ACTIVE trades after this many days (no trigger date)
+MAX_TRIGGERED_ACTIVE_DAYS = 60   # WARN (do not remove) when a TRIGGERED open position
+                                 # stays ACTIVE beyond this many days — usually a dead or
+                                 # halted price feed. Flagged for human review so an open
+                                 # trade is never silently dropped.
 
 # ── Scoring weights ────────────────────────────────────────────────────────────
 # Total = 100 points
@@ -163,8 +167,16 @@ if env_path.exists():
             line = line.strip()
             if line and not line.startswith("#") and "=" in line:
                 key, val = line.split("=", 1)
-                os.environ.setdefault(key, val)
+                # Strip surrounding quotes so KEY="value" and KEY=value both work.
+                val = val.strip().strip('"').strip("'")
+                os.environ.setdefault(key.strip(), val)
 
 DISCORD_PORTFOLIO_WEBHOOK = os.environ.get("DISCORD_WEBHOOK_URL", "")
 DISCORD_LONG_SIGNALS_WEBHOOK = os.environ.get("DISCORD_LONG_WEBHOOK_URL", "")
 DISCORD_SHORT_SIGNALS_WEBHOOK = os.environ.get("DISCORD_SHORT_WEBHOOK_URL", "")
+
+# ── Portfolio local backups (Fly volume) ───────────────────────────────────────
+# Before each save, the previous portfolio.json is copied into a rotating backup
+# folder on the same volume so a bad cleanup/prune is recoverable. Fully local —
+# no external service.
+PORTFOLIO_BACKUP_KEEP = 20   # how many timestamped backups to retain (0 = disable)
