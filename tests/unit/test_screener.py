@@ -345,9 +345,10 @@ def test_format_portfolio_for_discord_empty():
     assert "Portfolio is empty" in result
 
 def test_passes_quality_both_present():
-    """Both signals present → require score>=50 AND ml>=0.40."""
+    """Both signals present → require score>=50 AND ml>=0.45."""
     assert passes_quality(60, 0.46) is True     # both clear
-    assert passes_quality(60, 0.40) is True      # ml exactly at bar
+    assert passes_quality(60, 0.45) is True      # ml exactly at bar
+    assert passes_quality(60, 0.44) is False     # ml just below bar
     assert passes_quality(78, 0.34) is False     # ml below bar
     assert passes_quality(16, 0.63) is False     # score below bar
 
