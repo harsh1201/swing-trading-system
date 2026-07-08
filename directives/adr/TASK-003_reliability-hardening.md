@@ -22,6 +22,12 @@ a system that posts real trade signals:
 Separately, live portfolio state lives only on the Fly volume (`storage/portfolio.json`)
 with no version history, so a bad cleanup/prune was irreversible.
 
+A related latent risk was found while inspecting the live volume: the trained ML
+models (`models/*.json`) were caught by a broad `*.json` .gitignore and were **not
+version-controlled**. Deploys worked only because the files happened to exist in the
+local build context — a clean-clone/CI deploy would ship with no models, silently
+degrading the whole quality gate to score-only (the P1 failure mode).
+
 ## Decision Made
 1. **P1 — Make ML failures loud.** When the classifier fails to load (screener long
    & short paths, and the `update_portfolio` recompute loader), print an explicit
@@ -31,9 +37,11 @@ with no version history, so a bad cleanup/prune was irreversible.
    prints a per-ticker warning and preserves the trade's prior ML values (never a
    partial write).
 3. **P3 — Flag, don't drop.** `cleanup_portfolio()` counts triggered ACTIVE trades
-   open longer than `MAX_TRIGGERED_ACTIVE_DAYS` (60) into `active_stale_triggered`
+   open longer than `MAX_TRIGGERED_ACTIVE_DAYS` (90) into `active_stale_triggered`
    and surfaces the tickers in the run log for human review. The position is **kept**
-   — an open trade is never silently removed (consistent with ADR-002).
+   — an open trade is never silently removed (consistent with ADR-002). 90d was
+   chosen after inspecting the live portfolio: genuine multi-month trending holds
+   (e.g. MARICO, DIVISLAB) sit in the 60–70d range, so 60 would cry wolf.
 4. **P4 — Win-rate over decided trades.** Win-rate is now `wins / (wins + losses)` in
    both the Discord portfolio summary and the console summary. TRAIL/BREAKEVEN exits
    no longer dilute the denominator; the closed **count** still shows all states.
@@ -42,6 +50,10 @@ with no version history, so a bad cleanup/prune was irreversible.
    volume, keeping the newest `PORTFOLIO_BACKUP_KEEP` (20) versions.
    `restore_portfolio_from_backup()` rolls back to any snapshot. Fully local — no
    external service. (An earlier Supabase design was dropped: state is local on Fly.)
+6. **Track ML models in git.** `.gitignore` now un-ignores `models/*.json` so the
+   trained classifiers travel with every deploy — the ML gate can no longer silently
+   vanish on a clean checkout. (`xgb_target_short.json` is absent but unused while
+   `USE_XGBOOST_TARGET=False`.)
 
 ## Components / Files Modified
 - `config/settings.py`: add `MAX_TRIGGERED_ACTIVE_DAYS`, `PORTFOLIO_BACKUP_KEEP`;

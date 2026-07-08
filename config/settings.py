@@ -65,10 +65,11 @@ WALK_FORWARD_SPLIT_YEAR = 2023   # trades before year → in-sample (train)
 PENDING_EXPIRY_DAYS = 5    # Remove PENDING trades after this many days
 CLOSED_CLEANUP_DAYS = 15   # Remove CLOSED trades after this many days
 MAX_ACTIVE_DAYS = 30       # Remove stale ACTIVE trades after this many days (no trigger date)
-MAX_TRIGGERED_ACTIVE_DAYS = 60   # WARN (do not remove) when a TRIGGERED open position
+MAX_TRIGGERED_ACTIVE_DAYS = 90   # WARN (do not remove) when a TRIGGERED open position
                                  # stays ACTIVE beyond this many days — usually a dead or
                                  # halted price feed. Flagged for human review so an open
-                                 # trade is never silently dropped.
+                                 # trade is never silently dropped. Set to 90 so genuine
+                                 # multi-month trending holds don't trip the alarm.
 
 # ── Scoring weights ────────────────────────────────────────────────────────────
 # Total = 100 points
