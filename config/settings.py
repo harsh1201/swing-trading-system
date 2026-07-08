@@ -104,6 +104,14 @@ MIN_PRICE        = 15              # skip stocks priced below ₹15
 MIN_SCORE_THRESHOLD = 0       # skip candidates scoring below this (0 = no filter)
                               # test values: 0 (baseline) / 40 / 50 / 60 / 70
 
+# ── Quality gate (portfolio entry + Discord display) ──────────────────────────
+# Setups must clear BOTH bars to be tracked in the portfolio AND shown on
+# Discord (portfolio active/pending + trade signals). If one signal is missing,
+# gate on whichever is available; if neither is available, keep it (can't judge
+# — don't hide blind).
+PORTFOLIO_MIN_SCORE = 50      # min setup score (0-100)
+PORTFOLIO_MIN_ML    = 0.40    # min ML win probability (0-1)
+
 # ── Future safeguards (not yet enforced) ──────────────────────────────────────
 MIN_AVG_VOLUME      = 0       # reserved — use MIN_AVG_TURNOVER instead
 MAX_GAP_PCT         = 0.02    # maximum acceptable gap-up fraction (future use)

@@ -69,6 +69,8 @@ from config.settings import (
     SCORE_WEIGHT_RISK,
     SCORE_WEIGHT_RANGE,
     SCORE_WEIGHT_TREND,
+    PORTFOLIO_MIN_SCORE,
+    PORTFOLIO_MIN_ML,
     DISCORD_PORTFOLIO_WEBHOOK,
     DISCORD_LONG_SIGNALS_WEBHOOK,
     DISCORD_SHORT_SIGNALS_WEBHOOK,
@@ -330,9 +332,27 @@ def format_trade_row(t: dict) -> str:
     return f"{line1}\n{line2}\n{line3}\n{line4}\n{line5}\n{line6}\n{line7}\n{line8}\n{line9}\n{line10}"
 
 
+def passes_quality(score: float | None, ml_prob: float | None) -> bool:
+    """Discord display gate: keep only high-conviction rows.
+
+    Require score >= PORTFOLIO_MIN_SCORE AND ml_prob >= PORTFOLIO_MIN_ML.
+    If one signal is missing (0 / None), gate on whichever is available.
+    If neither is available, keep the row — can't judge, so don't hide blind.
+    """
+    have_score = score is not None and score > 0
+    have_ml    = ml_prob is not None and ml_prob > 0
+    if have_score and have_ml:
+        return score >= PORTFOLIO_MIN_SCORE and ml_prob >= PORTFOLIO_MIN_ML
+    if have_score:
+        return score >= PORTFOLIO_MIN_SCORE
+    if have_ml:
+        return ml_prob >= PORTFOLIO_MIN_ML
+    return True
+
+
 def format_portfolio_for_discord(trades: List[PortfolioTrade], strategy: str) -> str:
     """Format full portfolio with all trades as Discord messages."""
-    
+
     # Filter trades by the current strategy
     trades = [t for t in trades if t.get("strategy") == strategy]
     
@@ -373,15 +393,28 @@ def format_portfolio_for_discord(trades: List[PortfolioTrade], strategy: str) ->
         lines.append(f"📈 Win Rate: **{win_rate:.1f}%** | Avg R: **{avg_r:+.2f}** | Total R: **{total_r:+.2f}R**")
     lines.append("")
     
+    # Quality gate: only display rows clearing the score/ML bars (full set
+    # stays in the portfolio file; summary counts show shown/total honestly).
+    active_shown = [t for t in active
+                    if passes_quality(t.get("score", 0), t.get("ml_prob", 0))]
+    pending_shown = [t for t in pending
+                     if passes_quality(t.get("score", 0), t.get("ml_prob", 0))]
+
     if active:
-        lines.append(f"**═══ ACTIVE ({len(active)}) ═══**")
-        for t in active:
+        header = (f"**═══ ACTIVE ({len(active_shown)} of {len(active)} shown) ═══**"
+                  if len(active_shown) != len(active)
+                  else f"**═══ ACTIVE ({len(active)}) ═══**")
+        lines.append(header)
+        for t in active_shown:
             lines.append(format_trade_row(t))
         lines.append("")
-    
+
     if pending:
-        lines.append(f"**═══ PENDING ({len(pending)}) ═══**")
-        for t in pending:
+        header = (f"**═══ PENDING ({len(pending_shown)} of {len(pending)} shown) ═══**"
+                  if len(pending_shown) != len(pending)
+                  else f"**═══ PENDING ({len(pending)}) ═══**")
+        lines.append(header)
+        for t in pending_shown:
             lines.append(format_trade_row(t))
         lines.append("")
     
@@ -450,17 +483,26 @@ def send_signals_to_discord(setups: List[dict], strategy: str) -> None:
     
     if not webhook or not setups:
         return
-    
+
+    # Quality gate: only surface signals clearing the score/ML bars.
+    qualified = [s for s in setups
+                 if passes_quality(s["score"]["total"], s.get("ml_prob"))]
+    if not qualified:
+        return
+
     date_str = get_now().strftime("%d %b %Y")
     direction = "LONG" if strategy == "long_breakout" else "SHORT"
     emoji = "🟢" if direction == "LONG" else "🔴"
-    
+
     lines = []
     lines.append(f"{emoji} **{direction} TRADE SIGNALS** - {date_str}")
-    lines.append(f"Found **{len(setups)}** setup(s)")
+    count_note = (f"Found **{len(qualified)}** of {len(setups)} setup(s)"
+                  if len(qualified) != len(setups)
+                  else f"Found **{len(setups)}** setup(s)")
+    lines.append(count_note)
     lines.append("")
-    
-    for i, setup in enumerate(setups[:5], 1):
+
+    for i, setup in enumerate(qualified[:5], 1):
         lines.append(format_signal_for_discord(setup, i))
         lines.append("")
     
@@ -805,20 +847,26 @@ def _days_since(date_str: str) -> int | None:
 
 def cleanup_portfolio(trades: List[PortfolioTrade]) -> tuple[List[PortfolioTrade], dict]:
     """
-    Remove stale PENDING trades (> PENDING_EXPIRY_DAYS) and old CLOSED trades (> CLOSED_CLEANUP_DAYS).
+    Remove stale PENDING trades (> PENDING_EXPIRY_DAYS), low-quality PENDING
+    trades (below the score/ML gate), and old CLOSED trades (> CLOSED_CLEANUP_DAYS).
+    ACTIVE (open) positions are never pruned for quality — only aged out if stale.
     Returns (cleaned_trades, cleanup_stats) where cleanup_stats contains counts of removed trades.
     """
     cleaned = []
-    stats = {"pending_expired": 0, "closed_cleaned": 0}
-    
+    stats = {"pending_expired": 0, "pending_low_quality": 0, "closed_cleaned": 0}
+
     for t in trades:
         days_added = _days_since(t.get("date_added", ""))
         days_exited = _days_since(t.get("exit_date", ""))
         days_triggered = _days_since(t.get("entry_trigger_date", ""))
-        
+
         if t["status"] == "PENDING":
             if days_added is not None and days_added > PENDING_EXPIRY_DAYS:
                 stats["pending_expired"] += 1
+                continue
+            # Drop watchlist candidates that no longer clear the quality gate.
+            if not passes_quality(t.get("score", 0), t.get("ml_prob", 0)):
+                stats["pending_low_quality"] += 1
                 continue
         elif t["status"] == "CLOSED":
             if days_exited is not None and days_exited > CLOSED_CLEANUP_DAYS:
@@ -949,6 +997,8 @@ def update_portfolio(strategy: str) -> None:
     parts = []
     if cleanup_stats.get("pending_expired", 0) > 0:
         parts.append(f"{cleanup_stats['pending_expired']} PENDING expired")
+    if cleanup_stats.get("pending_low_quality", 0) > 0:
+        parts.append(f"{cleanup_stats['pending_low_quality']} PENDING low-quality")
     if cleanup_stats.get("closed_cleaned", 0) > 0:
         parts.append(f"{cleanup_stats['closed_cleaned']} CLOSED removed")
     
@@ -1112,6 +1162,11 @@ def update_portfolio(strategy: str) -> None:
 
 def add_to_portfolio(ticker: str, name: str, strategy: str, entry: float, sl: float, target: float, score: float = 0, ml_prob: float = 0.0, ml_r: float = 0.0) -> None:
     """Add a new setup to the portfolio if it is not already tracked."""
+    # Entry quality gate — don't track setups below the score/ML bars, so the
+    # portfolio stops accumulating low-conviction names (same rule as display).
+    if not passes_quality(score, ml_prob):
+        return
+
     trades = load_portfolio()
 
     # Avoid duplicates

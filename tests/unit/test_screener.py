@@ -21,6 +21,7 @@ from screener import (
     _calculate_r_multiple,
     _print_portfolio_summary,
     format_portfolio_for_discord,
+    passes_quality,
     post_to_discord,
     PENDING_EXPIRY_DAYS,
     CLOSED_CLEANUP_DAYS,
@@ -244,6 +245,28 @@ def test_cleanup_portfolio_active_kept():
     assert len(cleaned) == 1
 
 
+def test_cleanup_portfolio_pending_low_quality():
+    """PENDING below the quality gate is pruned; ACTIVE low-quality is kept."""
+    today = datetime.today().strftime("%d-%m-%Y")
+    trades = [
+        # Fails ML bar → pruned
+        {"ticker": "WEAK.NS", "status": "PENDING", "date_added": today,
+         "exit_date": "", "score": 78, "ml_prob": 0.30},
+        # Clears both bars → kept
+        {"ticker": "GOOD.NS", "status": "PENDING", "date_added": today,
+         "exit_date": "", "score": 60, "ml_prob": 0.46},
+        # Open position, low quality → NEVER pruned for quality
+        {"ticker": "OPEN.NS", "status": "ACTIVE", "date_added": today,
+         "entry_trigger_date": today, "exit_date": "", "score": 10, "ml_prob": 0.20},
+    ]
+
+    cleaned, stats = cleanup_portfolio(trades)
+
+    assert stats["pending_low_quality"] == 1
+    tickers = {t["ticker"] for t in cleaned}
+    assert tickers == {"GOOD.NS", "OPEN.NS"}
+
+
 def test_cleanup_portfolio_pending_not_expired():
     """Test that PENDING trades within expiry period are kept."""
     today = datetime.today()
@@ -320,6 +343,44 @@ def test_format_portfolio_for_discord_empty():
     """Test Discord formatting with empty portfolio."""
     result = format_portfolio_for_discord([], "long_breakout")
     assert "Portfolio is empty" in result
+
+def test_passes_quality_both_present():
+    """Both signals present → require score>=50 AND ml>=0.40."""
+    assert passes_quality(60, 0.46) is True     # both clear
+    assert passes_quality(60, 0.40) is True      # ml exactly at bar
+    assert passes_quality(78, 0.34) is False     # ml below bar
+    assert passes_quality(16, 0.63) is False     # score below bar
+
+
+def test_passes_quality_one_missing():
+    """Missing signal (0/None) → gate on whichever is available."""
+    assert passes_quality(60, 0) is True         # only score, clears
+    assert passes_quality(14, None) is False     # only score, fails
+    assert passes_quality(0, 0.55) is True       # only ml, clears
+    assert passes_quality(None, 0.30) is False   # only ml, fails
+
+
+def test_passes_quality_neither():
+    """Neither signal available → keep (can't judge, don't hide blind)."""
+    assert passes_quality(0, 0) is True
+    assert passes_quality(None, None) is True
+
+
+def test_format_portfolio_quality_gate_counts():
+    """Filtered rows are hidden but the true count stays in the header."""
+    trades = [
+        {"ticker": "GOOD.NS", "status": "ACTIVE", "strategy": "long_breakout",
+         "entry": 100, "stop_loss": 95, "target": 110, "current_price": 101,
+         "score": 60, "ml_prob": 0.46, "r_multiple": 0},
+        {"ticker": "WEAK.NS", "status": "ACTIVE", "strategy": "long_breakout",
+         "entry": 100, "stop_loss": 95, "target": 110, "current_price": 98,
+         "score": 20, "ml_prob": 0.35, "r_multiple": 0},
+    ]
+    result = format_portfolio_for_discord(trades, "long_breakout")
+    assert "1 of 2 shown" in result   # honest count
+    assert "GOOD" in result
+    assert "WEAK" not in result       # low-quality row hidden
+
 
 def test_post_to_discord_no_webhook():
     """Test post_to_discord returns False when webhook is empty."""
@@ -538,6 +599,29 @@ def test_add_to_portfolio():
     sig = inspect.signature(add_to_portfolio)
     assert "ml_prob" in sig.parameters
     assert "ml_r" in sig.parameters
+
+
+def test_add_to_portfolio_entry_gate(tmp_path, monkeypatch):
+    """Weak setups are rejected at entry; qualifying ones are tracked."""
+    from screener import add_to_portfolio, load_portfolio, save_portfolio
+    from data.cache import DataCache
+
+    cache_path = tmp_path / "portfolio.json"
+    monkeypatch.setattr("screener._get_portfolio_cache",
+                        lambda: DataCache(str(cache_path)))
+    save_portfolio([])
+
+    # Below the ML bar → rejected
+    add_to_portfolio("WEAK.NS", "Weak", "long_breakout", 100, 95, 110,
+                     score=78, ml_prob=0.34)
+    assert load_portfolio() == []
+
+    # Clears both bars → tracked
+    add_to_portfolio("GOOD.NS", "Good", "long_breakout", 100, 95, 110,
+                     score=60, ml_prob=0.46)
+    tracked = load_portfolio()
+    assert len(tracked) == 1
+    assert tracked[0]["ticker"] == "GOOD.NS"
 
 
 def test_send_portfolio_to_discord_no_trades(monkeypatch):
