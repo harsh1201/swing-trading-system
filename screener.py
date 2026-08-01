@@ -31,6 +31,7 @@ Pipeline
 import sys
 import argparse
 import os
+import json
 import shutil
 from typing import TypedDict, List
 
@@ -74,6 +75,7 @@ from config.settings import (
     SCORE_WEIGHT_TREND,
     PORTFOLIO_MIN_SCORE,
     PORTFOLIO_MIN_ML,
+    XGB_FEATURE_NAMES,
     DISCORD_PORTFOLIO_WEBHOOK,
     DISCORD_LONG_SIGNALS_WEBHOOK,
     DISCORD_SHORT_SIGNALS_WEBHOOK,
@@ -101,6 +103,8 @@ from strategies.long_breakout import (
     score_long_breakout,
     calculate_trade_setup,
     extract_ml_features,
+    calculate_market_breadth,
+    passes_vol_regime,
 )
 from strategies.short_breakout import (
     TrendResult as ShortTrendResult,
@@ -150,6 +154,7 @@ class PortfolioTrade(TypedDict):
     score: float  # Setup score at entry time (0-100)
     ml_prob: float  # ML win probability (0.0-1.0)
     ml_r: float     # ML predicted R-multiple
+    features: dict[str, float]  # XGB_FEATURE_NAMES snapshot at signal time
 
 class MarketRegimeInfo(TypedDict):
     close: float | None
@@ -532,6 +537,67 @@ def fetch_data(
     disk.  Pass refresh=True to force a fresh download for today's prices.
     """
     return fetch_ohlcv(ticker, days, refresh=refresh)
+
+
+# ── Universe & market breadth ─────────────────────────────────────────────────
+
+_UNIVERSE: dict[str, pd.DataFrame] | None = None
+_UNIVERSE_SKIPPED = 0
+
+# Bars retained per symbol. The deepest lookback in the screener is EMA200, so
+# 300 leaves ample margin while keeping the whole universe in memory.
+UNIVERSE_BARS = 300
+
+
+def load_universe() -> tuple[dict[str, pd.DataFrame], int]:
+    """Fetch and index every symbol in STOCKS, once per process.
+
+    Both scan loops and `market_breadth()` read from this, so the universe is
+    built one time rather than per caller.  Returns the indexed frames plus the
+    count of symbols dropped on fetch/indicator errors, which the callers fold
+    into their own `skipped` tally.
+    """
+    global _UNIVERSE, _UNIVERSE_SKIPPED
+    if _UNIVERSE is not None:
+        return _UNIVERSE, _UNIVERSE_SKIPPED
+
+    data: dict[str, pd.DataFrame] = {}
+    dropped = 0
+    for ticker in STOCKS:
+        try:
+            df = fetch_data(ticker)
+            if df is None:
+                dropped += 1
+                continue
+            # Indicators first (EMA200 needs the full history to warm up), then
+            # trim. Cached CSVs carry ~2000 bars but nothing reads past EMA200,
+            # and holding every untrimmed frame would cost ~240 MB on a 1 GB VM.
+            data[ticker] = add_indicators(df).tail(UNIVERSE_BARS)
+        except Exception as exc:
+            if not LIVE_MODE:
+                print(f"  {ticker:<16}  LOAD ERROR: {exc}")
+            dropped += 1
+
+    _UNIVERSE, _UNIVERSE_SKIPPED = data, dropped
+    return _UNIVERSE, _UNIVERSE_SKIPPED
+
+
+def market_breadth() -> float:
+    """Percent of the universe closing above its own EMA50.
+
+    This is the model's `market_breadth` feature.  Training rows carry real
+    values (roughly 8–96); the screener previously hardcoded 0.0 here, feeding
+    the model a value that appears nowhere in its training data.
+    """
+    data, _ = load_universe()
+    if not data:
+        return 0.0
+    # calculate_market_breadth measures every symbol as of the reference frame's
+    # last bar, so the reference must be a *current* series. Picking dict-order
+    # first would silently date the whole measurement to a delisted or halted
+    # symbol's final bar; take the most recently updated frame instead.
+    ref = max(data.values(), key=lambda d: d.index[-1])
+    return calculate_market_breadth(data, len(ref) - 1, ref)
 
 
 # ── Market regime (screener-specific: fetches its own Nifty data) ─────────────
@@ -917,6 +983,29 @@ def _days_since(date_str: str) -> int | None:
         return None
 
 
+def _closed_archive_path() -> str:
+    """Append-only log of closed trades, on the same volume as portfolio.json."""
+    return os.path.join(os.path.dirname(_get_portfolio_cache().filepath),
+                        "closed_trades.jsonl")
+
+
+def _archive_closed_trade(t: PortfolioTrade) -> None:
+    """Append a closed trade to the archive before cleanup drops it.
+
+    Cleanup prunes CLOSED trades after CLOSED_CLEANUP_DAYS to keep the active
+    view readable, which previously destroyed the only record of how a live
+    signal actually resolved. Archiving first means live outcomes accumulate into
+    a training corpus instead.
+
+    Best-effort: a failure here must never block the cleanup that called it.
+    """
+    try:
+        with open(_closed_archive_path(), "a") as fh:
+            fh.write(json.dumps(t) + "\n")
+    except Exception as e:
+        print(f"  [!] Closed-trade archive failed (non-fatal): {e}")
+
+
 def cleanup_portfolio(trades: List[PortfolioTrade]) -> tuple[List[PortfolioTrade], dict]:
     """
     Remove stale PENDING trades (> PENDING_EXPIRY_DAYS), low-quality PENDING
@@ -942,6 +1031,7 @@ def cleanup_portfolio(trades: List[PortfolioTrade]) -> tuple[List[PortfolioTrade
                 continue
         elif t["status"] == "CLOSED":
             if days_exited is not None and days_exited > CLOSED_CLEANUP_DAYS:
+                _archive_closed_trade(t)
                 stats["closed_cleaned"] += 1
                 continue
         elif t["status"] == "ACTIVE":
@@ -1052,7 +1142,9 @@ def _recompute_ml_for_trade(t: dict, df: pd.DataFrame, ml_models: dict) -> None:
         atr_pct = round(atr_val / close_val * 100, 4) if close_val > 0 else 0.0
 
         extract_fn = extract_ml_features if sname == "long" else extract_ml_features_short
-        ml_feat = extract_fn(df, len(df) - 1, trend, coil, vol_result, score, atr_pct, 0.0)
+        ml_feat = extract_fn(
+            df, len(df) - 1, trend, coil, vol_result, score, atr_pct, market_breadth()
+        )
         if clf is not None:
             t["ml_prob"] = round(xgb_predict(clf, ml_feat, mode="classification"), 4)
         if reg is not None:
@@ -1298,7 +1390,7 @@ def update_portfolio(strategy: str) -> None:
     save_portfolio(updated_trades)
     print("=" * 90 + "\n")
 
-def add_to_portfolio(ticker: str, name: str, strategy: str, entry: float, sl: float, target: float, score: float = 0, ml_prob: float = 0.0, ml_r: float = 0.0) -> None:
+def add_to_portfolio(ticker: str, name: str, strategy: str, entry: float, sl: float, target: float, score: float = 0, ml_prob: float = 0.0, ml_r: float = 0.0, features: dict[str, float] | None = None) -> None:
     """Add a new setup to the portfolio if it is not already tracked."""
     # Entry quality gate — don't track setups below the score/ML bars, so the
     # portfolio stops accumulating low-conviction names (same rule as display).
@@ -1328,6 +1420,10 @@ def add_to_portfolio(ticker: str, name: str, strategy: str, entry: float, sl: fl
         "score": score,
         "ml_prob": ml_prob,
         "ml_r": ml_r,
+        # Snapshot of the feature vector that produced ml_prob/ml_r. Written once
+        # at signal time and never refreshed — it has to keep describing the entry
+        # decision, otherwise the closed trade is useless as a training row.
+        "features": features or {},
     }
     trades.append(new_trade)
     save_portfolio(trades)
@@ -1385,34 +1481,21 @@ def run_screener() -> None:
     if LIVE_MODE:
         print(f"  Scanning {total} stocks ...", flush=True)
 
+    # Universe is loaded up front so market breadth can be measured across every
+    # symbol before any one of them is scored.
+    universe, skipped = load_universe()
+    breadth = market_breadth()
+    print(f"  Market breadth        :  {breadth:.1f}% above EMA50")
+
     # ── Scan loop ─────────────────────────────────────────────────────────────
-    for ticker, name in STOCKS.items():
+    for ticker, df in universe.items():
+        name = STOCKS[ticker]
         n = scanned + skipped + 1
 
         if not LIVE_MODE:
             print(f"  [{n:>3}/{total}]  {name:<26} ({ticker:<16})  ",
                   end="", flush=True)
 
-        try:
-            df = fetch_data(ticker)
-        except Exception as exc:
-            if not LIVE_MODE:
-                print(f"FETCH ERROR: {exc}")
-            skipped += 1
-            continue
-        if df is None:
-            if not LIVE_MODE:
-                print("NO DATA")
-            skipped += 1
-            continue
-
-        try:
-            df = add_indicators(df)
-        except Exception as exc:
-            if not LIVE_MODE:
-                print(f"INDICATOR ERROR: {exc}")
-            skipped += 1
-            continue
         scanned += 1
 
         # Price floor — skip penny stocks
@@ -1489,6 +1572,11 @@ def run_screener() -> None:
 
         score = score_long_breakout(trend, coil)
 
+        # Volatility-regime gate — must mirror backtest.py, or live selection
+        # silently diverges from the backtested strategy.
+        if not passes_vol_regime(df, len(df) - 1, "long"):
+            continue
+
         # ML feature vector (shared by regressor + classifier)
         ml_features = None
         if (xgb_model is not None or xgb_clf_model is not None) and XGB_AVAILABLE:
@@ -1496,7 +1584,7 @@ def run_screener() -> None:
             atr_val = float(df["ATR"].iloc[-1]) if "ATR" in df.columns else 0.0
             atr_pct = round(atr_val / close_val * 100, 4) if close_val > 0 else 0.0
             ml_features = extract_ml_features(
-                df, len(df) - 1, trend, coil, vol, score, atr_pct, 0.0,
+                df, len(df) - 1, trend, coil, vol, score, atr_pct, breadth,
             )
         # ML target prediction (regression)
         ml_r_val = None
@@ -1522,7 +1610,7 @@ def run_screener() -> None:
         signal_date = df.index[-1].strftime("%d-%m-%Y") if hasattr(df.index[-1], "strftime") else str(df.index[-1])
         
         # Track setup in portfolio
-        add_to_portfolio(ticker, name, "long_breakout", setup["entry"], setup["stop_loss"], setup["target"], score['total'], ml_prob_val, ml_r_val)
+        add_to_portfolio(ticker, name, "long_breakout", setup["entry"], setup["stop_loss"], setup["target"], score['total'], ml_prob_val, ml_r_val, ml_features)
 
         final_setups.append({
             "name":   name,
@@ -1895,39 +1983,26 @@ def run_screener_short() -> None:
     if LIVE_MODE:
         print(f"  Scanning {total} stocks ...", flush=True)
 
+    # Universe is loaded up front so market breadth can be measured across every
+    # symbol before any one of them is scored.
+    universe, skipped = load_universe()
+    breadth = market_breadth()
+    print(f"  Market breadth        :  {breadth:.1f}% above EMA50")
+
     # ── Scan loop ─────────────────────────────────────────────────────────────
-    for ticker, name in STOCKS.items():
+    for ticker, df in universe.items():
         # Skip if already in portfolio (any status) - prevents duplicate signals
         if ticker in portfolio_tickers:
             skipped += 1
             continue
-        
+
+        name = STOCKS[ticker]
         n = scanned + skipped + 1
 
         if not LIVE_MODE:
             print(f"  [{n:>3}/{total}]  {name:<26} ({ticker:<16})  ",
                   end="", flush=True)
 
-        try:
-            df = fetch_data(ticker)
-        except Exception as exc:
-            if not LIVE_MODE:
-                print(f"FETCH ERROR: {exc}")
-            skipped += 1
-            continue
-        if df is None:
-            if not LIVE_MODE:
-                print("NO DATA")
-            skipped += 1
-            continue
-
-        try:
-            df = add_indicators(df)
-        except Exception as exc:
-            if not LIVE_MODE:
-                print(f"INDICATOR ERROR: {exc}")
-            skipped += 1
-            continue
         scanned += 1
 
         # Price floor — skip penny stocks
@@ -2005,6 +2080,11 @@ def run_screener_short() -> None:
 
         score = score_short_breakout(trend, coil)
 
+        # Volatility-regime gate — must mirror backtest.py, or live selection
+        # silently diverges from the backtested strategy.
+        if not passes_vol_regime(df, len(df) - 1, "short"):
+            continue
+
         # ML feature vector (shared by regressor + classifier)
         ml_features = None
         if (xgb_model is not None or xgb_clf_model is not None) and XGB_AVAILABLE:
@@ -2012,7 +2092,7 @@ def run_screener_short() -> None:
             atr_val = float(df["ATR"].iloc[-1]) if "ATR" in df.columns else 0.0
             atr_pct = round(atr_val / close_val * 100, 4) if close_val > 0 else 0.0
             ml_features = extract_ml_features_short(
-                df, len(df) - 1, trend, coil, vol, score, atr_pct, 0.0,
+                df, len(df) - 1, trend, coil, vol, score, atr_pct, breadth,
             )
         # ML target prediction (regression)
         ml_r_val = None
@@ -2038,7 +2118,7 @@ def run_screener_short() -> None:
         signal_date = df.index[-1].strftime("%d-%m-%Y") if hasattr(df.index[-1], "strftime") else str(df.index[-1])
 
         # Track setup in portfolio
-        add_to_portfolio(ticker, name, "short_breakout", setup["entry"], setup["stop_loss"], setup["target"], score['total'], ml_prob_val, ml_r_val)
+        add_to_portfolio(ticker, name, "short_breakout", setup["entry"], setup["stop_loss"], setup["target"], score['total'], ml_prob_val, ml_r_val, ml_features)
 
         final_setups.append({
             "name":   name,
@@ -2121,6 +2201,72 @@ def run_screener_short() -> None:
     print()
 
 
+def _approx_bars_held(t: dict) -> int:
+    """Trading bars a trade was open, approximated from its dates.
+
+    The archive stores dates, not bar indices, so this converts calendar days at
+    5/7 to approximate sessions. Metadata only — `bars_held` is not a model
+    feature — but writing a real number beats writing a placebo 0.
+    """
+    start = _parse_ddmmyyyy(t.get("entry_trigger_date", "")) or _parse_ddmmyyyy(t.get("date_added", ""))
+    end = _parse_ddmmyyyy(t.get("exit_date", ""))
+    if start is None or end is None or end < start:
+        return 0
+    return int((end - start).days * 5 / 7)
+
+
+def export_live_ml(strategy: str, out_path: str) -> int:
+    """Write archived live trades out as training rows.
+
+    Emits the same columns as the backtest's --export-ml-data CSVs, so live
+    outcomes concatenate straight onto backtest rows. Trades predating the
+    feature snapshot are skipped — without the feature vector there is no row to
+    write. Returns the number of rows exported.
+    """
+    path = _closed_archive_path()
+    if not os.path.exists(path):
+        print(f"  No archive yet at {path}")
+        return 0
+
+    rows = []
+    skipped_no_features = 0
+    with open(path) as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            t = json.loads(line)
+            if t.get("strategy") != strategy:
+                continue
+            feats = t.get("features") or {}
+            if not all(f in feats for f in XGB_FEATURE_NAMES):
+                skipped_no_features += 1
+                continue
+            rows.append({
+                **{f: feats[f] for f in XGB_FEATURE_NAMES},
+                "ticker": t.get("ticker", ""),
+                "signal_date": t.get("date_added", ""),
+                "entry_price": t.get("entry", 0.0),
+                "stop_loss": t.get("stop_loss", 0.0),
+                "target": t.get("target", 0.0),
+                "r_multiple": t.get("r_multiple", 0.0),
+                "outcome": str(t.get("outcome", "")).lower(),
+                "bars_held": _approx_bars_held(t),
+            })
+
+    if skipped_no_features:
+        print(f"  Skipped {skipped_no_features} trade(s) with no feature snapshot "
+              f"(recorded before feature capture landed)")
+    if not rows:
+        print("  No exportable rows.")
+        return 0
+
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    pd.DataFrame(rows).to_csv(out_path, index=False)
+    print(f"  Exported {len(rows)} live row(s) -> {out_path}")
+    return len(rows)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="NSE Swing Trade Screener")
     parser.add_argument(
@@ -2129,7 +2275,16 @@ def main() -> None:
         choices=["long_breakout", "short_breakout"],
         help="Strategy to run: long_breakout or short_breakout",
     )
+    parser.add_argument(
+        "--export-live-ml",
+        metavar="CSV",
+        help="Export archived live trades for this strategy as ML training rows",
+    )
     args = parser.parse_args()
+
+    if args.export_live_ml:
+        export_live_ml(args.strategy, args.export_live_ml)
+        return
 
     if args.strategy == "long_breakout":
         run_screener()

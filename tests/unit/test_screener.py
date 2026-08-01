@@ -1,5 +1,6 @@
 import pytest
 import pandas as pd
+import json
 import sys
 from datetime import datetime, timedelta
 from io import StringIO
@@ -1132,3 +1133,102 @@ def test_update_portfolio_persists_closed_trades(tmp_path, monkeypatch):
     after = {t["ticker"] for t in cache.load("portfolio")["trades"]}
     assert "CLOSEDWIN.NS" in after   # closed win (3d old) survived the run
     assert "PEND.NS" in after
+
+
+# ── Closed-trade archive & live ML export ────────────────────────────────────
+def _closed_trade(**over):
+    """A CLOSED trade old enough for cleanup to prune."""
+    from config.settings import XGB_FEATURE_NAMES
+    t = {
+        "ticker": "ACME.NS", "name": "Acme", "strategy": "long_breakout",
+        "status": "CLOSED", "entry": 100.0, "stop_loss": 95.0, "target": 110.0,
+        "date_added": "01-01-2024", "entry_trigger_date": "02-01-2024",
+        "exit_date": "03-01-2024", "outcome": "WIN", "r_multiple": 2.0,
+        "current_price": 110.0, "score": 70.0, "ml_prob": 0.6, "ml_r": 2.0,
+        "features": {f: 1.0 for f in XGB_FEATURE_NAMES},
+    }
+    t.update(over)
+    return t
+
+
+def test_aged_closed_trade_is_archived_not_lost(tmp_path, monkeypatch):
+    """Cleanup prunes old CLOSED trades from the active view; the row itself must
+    survive in the archive, or live outcomes never become training data."""
+    import screener
+
+    archive = tmp_path / "closed_trades.jsonl"
+    monkeypatch.setattr(screener, "_closed_archive_path", lambda: str(archive))
+
+    cleaned, stats = screener.cleanup_portfolio([_closed_trade()])
+
+    assert cleaned == []                      # pruned from the active portfolio
+    assert stats["closed_cleaned"] == 1
+    assert json.loads(archive.read_text().strip())["ticker"] == "ACME.NS"
+
+
+def test_export_live_ml_writes_training_rows(tmp_path, monkeypatch):
+    import screener
+    from config.settings import XGB_FEATURE_NAMES
+
+    archive = tmp_path / "closed_trades.jsonl"
+    archive.write_text(
+        json.dumps(_closed_trade()) + "\n"
+        + json.dumps(_closed_trade(ticker="OTHER.NS", strategy="short_breakout")) + "\n"
+    )
+    monkeypatch.setattr(screener, "_closed_archive_path", lambda: str(archive))
+
+    out = tmp_path / "live.csv"
+    assert screener.export_live_ml("long_breakout", str(out)) == 1
+
+    df = pd.read_csv(out)
+    assert list(df["ticker"]) == ["ACME.NS"]          # other strategy filtered out
+    assert list(df["outcome"]) == ["win"]             # lowercased to match backtest
+    assert all(f in df.columns for f in XGB_FEATURE_NAMES)
+
+
+def test_export_live_ml_skips_trades_without_features(tmp_path, monkeypatch):
+    """Trades recorded before feature capture landed have no vector to train on."""
+    import screener
+
+    archive = tmp_path / "closed_trades.jsonl"
+    archive.write_text(json.dumps(_closed_trade(features={})) + "\n")
+    monkeypatch.setattr(screener, "_closed_archive_path", lambda: str(archive))
+
+    assert screener.export_live_ml("long_breakout", str(tmp_path / "live.csv")) == 0
+
+
+# ── Screener / backtest parity ───────────────────────────────────────────────
+def test_vol_regime_gate_applied_in_both_screener_and_backtest():
+    """long_breakout.py is the single source of truth: any entry gate must run in
+    BOTH the live screener and the backtest. A gate present in only one makes the
+    backtest a fiction — live selection would silently diverge from it."""
+    import re
+    screener_src = open("screener.py").read()
+    backtest_src = open("backtest.py").read()
+    for src, name in ((screener_src, "screener.py"), (backtest_src, "backtest.py")):
+        for side in ("long", "short"):
+            assert re.search(rf'passes_vol_regime\(.*"{side}"\)', src), \
+                f"{name} is missing the vol-regime gate on the {side} scan path"
+
+
+def test_market_breadth_reference_is_the_most_current_frame(monkeypatch):
+    """Breadth measures every symbol as of the reference frame's last bar, so a
+    stale (delisted/halted) frame must never become the reference."""
+    import screener
+    idx_old = pd.date_range("2024-01-01", periods=300, freq="D")
+    idx_new = pd.date_range("2026-01-01", periods=300, freq="D")
+    def frame(idx, close):
+        return pd.DataFrame({"Close": close, "EMA50": close - 1.0}, index=idx)
+    universe = {
+        "STALE.NS": frame(idx_old, 100.0),   # first in dict order, but delisted
+        "LIVE.NS": frame(idx_new, 100.0),
+    }
+    monkeypatch.setattr(screener, "load_universe", lambda: (universe, 0))
+    captured = {}
+    def spy(all_data, i, reference_df):
+        captured["ref_last"] = reference_df.index[-1]
+        return 55.0
+    monkeypatch.setattr(screener, "calculate_market_breadth", spy)
+    screener.market_breadth()
+    assert captured["ref_last"] == idx_new[-1], \
+        "breadth dated itself to a stale frame instead of the most current one"

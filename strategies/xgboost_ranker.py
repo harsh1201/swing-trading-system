@@ -101,6 +101,13 @@ def prepare_training_data(
 
     df = df.dropna(subset=FEATURES)
 
+    # Chronological order is load-bearing: the train/val/test split below is a
+    # time-series split, and an unsorted CSV would leak the future into training.
+    if "signal_date" in df.columns:
+        df = df.assign(
+            _dt=pd.to_datetime(df["signal_date"], dayfirst=True, format="mixed")
+        ).sort_values("_dt").drop(columns="_dt")
+
     if mode == "classification":
         # Binary label: 1 = hit target (win), 0 = everything else
         df["label"] = (df["outcome"] == "win").astype(int)
@@ -138,14 +145,21 @@ def train_model(
     if len(df) < 200:
         print(f"  [WARN] Only {len(df)} samples — XGBoost needs >= 500 for reliable results.")
 
-    X = df[FEATURES].values
+    # Keep the DataFrame (not .values) so the booster records real feature names —
+    # otherwise importance prints f0..f9 and inference passes named columns to an
+    # unnamed model.
+    X = df[FEATURES]
     y = df["label"].values if mode == "classification" else df["r_multiple"].values
 
-    split_idx = int(len(df) * 0.8)
-    X_train, y_train = X[:split_idx], y[:split_idx]
-    X_test, y_test = X[split_idx:], y[split_idx:]
+    # Three-way chronological split. Early stopping consumes `val`, so `test` stays
+    # untouched and the reported metrics are honest out-of-sample numbers.
+    train_idx = int(len(df) * 0.6)
+    val_idx = int(len(df) * 0.8)
+    X_train, y_train = X.iloc[:train_idx], y[:train_idx]
+    X_val, y_val = X.iloc[train_idx:val_idx], y[train_idx:val_idx]
+    X_test, y_test = X.iloc[val_idx:], y[val_idx:]
 
-    print(f"  Train: {len(X_train)} samples, Test: {len(X_test)} samples")
+    print(f"  Train: {len(X_train)}  Val: {len(X_val)}  Test: {len(X_test)} samples")
 
     try:
         import xgboost as xgb
@@ -153,10 +167,14 @@ def train_model(
         print("  [ERROR] xgboost not installed. Run: pip install xgboost")
         return None
 
-    from sklearn.utils import class_weight
-    classes = np.array([0, 1])
-    weights = class_weight.compute_class_weight("balanced", classes=classes, y=y_train)
-    sample_weights = np.where(y_train == 1, weights[1], weights[0])
+    if mode == "classification":
+        from sklearn.utils import class_weight
+        weights = class_weight.compute_class_weight(
+            "balanced", classes=np.array([0, 1]), y=y_train
+        )
+        sample_weights = np.where(y_train == 1, weights[1], weights[0])
+    else:
+        sample_weights = None  # class weights are meaningless for continuous R
 
     if mode == "classification":
         model = xgb.XGBClassifier(
@@ -198,7 +216,7 @@ def train_model(
     model.fit(
         X_train, y_train,
         sample_weight=sample_weights,
-        eval_set=[(X_test, y_test)],
+        eval_set=[(X_val, y_val)],
         verbose=False,
     )
 

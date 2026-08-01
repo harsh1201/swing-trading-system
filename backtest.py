@@ -90,6 +90,7 @@ from strategies.long_breakout import (
     calculate_market_breadth,
     check_consolidation,
     check_liquidity,
+    passes_vol_regime,
     check_trend,
     check_volume,
     check_candle_strength,
@@ -278,6 +279,10 @@ def scan_candidates(
 
         # Score gate — skip low-quality setups (set MIN_SCORE_THRESHOLD in settings)
         if sc["total"] < MIN_SCORE_THRESHOLD:
+            continue
+
+        # Volatility-regime gate — skip setups fired into unusual turbulence
+        if not passes_vol_regime(df, idx, "long"):
             continue
 
         # ATR % at entry bar
@@ -1178,6 +1183,10 @@ def scan_candidates_short(
         if sc["total"] < MIN_SCORE_THRESHOLD:
             continue
 
+        # Volatility-regime gate — skip setups fired into unusual turbulence
+        if not passes_vol_regime(df, idx, "short"):
+            continue
+
         # ATR % at entry bar
         atr_pct = 0.0
         if "ATR" in df.columns:
@@ -1837,7 +1846,20 @@ def main() -> None:
         default=0.30,
         help="Minimum win probability to accept a trade (default: 0.30)",
     )
+    parser.add_argument(
+        "--vol-regime-filter",
+        action="store_true",
+        help="Enable the volatility-regime entry gate (overrides USE_VOL_REGIME_FILTER)",
+    )
     args = parser.parse_args()
+
+    # A/B the vol-regime gate without editing settings. Both scan paths call
+    # long_breakout.passes_vol_regime, which reads its own module global at call
+    # time — so rebinding it there covers long and short alike.
+    if args.vol_regime_filter:
+        import strategies.long_breakout as _lb
+        _lb.USE_VOL_REGIME_FILTER = True
+        print(f"  [*] Volatility-regime filter ON (max {_lb.MAX_VOL_REGIME})")
 
     # Strategy dispatch — add new strategies here as elif branches
     if args.strategy == "long_breakout":
