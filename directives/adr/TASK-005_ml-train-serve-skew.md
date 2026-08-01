@@ -137,10 +137,32 @@ the one the bug destroyed.
 > monotonic, which a threshold rule captures and a boosted-tree model on 600 rows
 > cannot learn without overfitting. The lever is a filter, not a bigger model.
 
-**Not implemented.** Adding a `vol_regime` entry filter changes live trade selection
-and discards ~36% of setups; net profitability requires a backtest with the filter
-applied, which the +3.2pts win-rate figure does not by itself establish (`r_multiple`
-is MFE, so true expectancy cannot be computed from these CSVs).
+### Backtested — long only, and it is the largest win of this work
+
+Both arms on the same 2026-08-02 data snapshot (`--no-refresh`), threshold 0.942:
+
+| | trades | win rate | net P&L | max drawdown |
+|---|---|---|---|---|
+| long, baseline | 631 | 29.6% | +595.45% | 7.17% |
+| long, filtered | 558 | **33.3%** | **+693.28%** | **5.54%** |
+| short, baseline | 478 | 21.5% | **+28.08%** | 32.03% |
+| short, filtered | 400 | 22.2% | +20.38% | 31.63% |
+
+Long improves on every axis simultaneously — higher return *and* lower drawdown on
+12% fewer trades. Short loses 8pts of net return for no drawdown benefit, exactly as
+the univariate screen predicted (long p=0.0002 / +17.7pts; short p=0.33 / +4.7pts).
+
+Implemented as `calculate_vol_regime` / `passes_vol_regime` in `long_breakout.py`
+(single source of truth), gated by `VOL_REGIME_STRATEGIES = ("long",)`, with
+`--vol-regime-filter` on `backtest.py` for A/B runs.
+
+**Left OFF by default** (`USE_VOL_REGIME_FILTER = False`). Enabling it is a live
+trade-selection change and is the owner's call. Two honest caveats: the 0.942
+threshold is the 67th percentile of this same dataset, so that constant is fitted
+in-sample (the effect is not — a walk-forward with past-only thresholds still gave
++3.2pts, positive in 5 of 5 folds); and backtests are not reproducible across
+yfinance refreshes (a same-config short run moved 432→478 trades between June 25 and
+August 2), so only same-snapshot comparisons are meaningful.
 
 ## Explicitly Not Done
 - **`PORTFOLIO_MIN_ML` stays at 0.45.** Owner's call, taken with the 0.494 holdout

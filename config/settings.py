@@ -107,6 +107,20 @@ MIN_PRICE        = 15              # skip stocks priced below ₹15
 
 # ── Score threshold (backtest candidate filter) ───────────────────────────────
 MIN_SCORE_THRESHOLD = 0       # skip candidates scoring below this (0 = no filter)
+
+# ── Volatility-regime entry filter ────────────────────────────────────────────
+# vol_regime = ATR% at entry / median ATR% over the prior VOL_REGIME_LOOKBACK bars.
+# Below 1.0 means the stock is calmer than its own recent norm. Long setups taken
+# in the calm tercile won 41.4% vs 23.7% in the turbulent tercile (p=0.0003,
+# direction holding in 8 of 8 years) — see ADR-005. Off by default: enabling it
+# discards ~36% of setups, so turn it on only with backtest evidence.
+USE_VOL_REGIME_FILTER = False
+MAX_VOL_REGIME        = 0.942   # 67th percentile of observed long setups
+VOL_REGIME_LOOKBACK   = 100
+# Long only. The effect is significant for longs (p=0.0002, +17.7pts calm vs
+# turbulent) and absent for shorts (p=0.33, +4.7pts) — and the backtest agrees:
+# applied to shorts it costs 8pts of net return for no drawdown benefit.
+VOL_REGIME_STRATEGIES = ("long",)
                               # test values: 0 (baseline) / 40 / 50 / 60 / 70
 
 # ── Quality gate (portfolio entry + Discord display) ──────────────────────────

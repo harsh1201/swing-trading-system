@@ -27,6 +27,10 @@ import pandas as pd
 
 from config.settings import (
     ATR_PERIOD,
+    USE_VOL_REGIME_FILTER,
+    MAX_VOL_REGIME,
+    VOL_REGIME_LOOKBACK,
+    VOL_REGIME_STRATEGIES,
     EMA_ULTRA_SHORT,
     EMA_SHORT,
     EMA_LONG,
@@ -620,6 +624,40 @@ def extract_ml_features(
         "atr_pct": atr_pct,
         "market_breadth": market_breadth,
     }
+
+
+# ── Volatility regime ─────────────────────────────────────────────────────────
+
+def calculate_vol_regime(df: pd.DataFrame, idx: int) -> float:
+    """ATR% at bar `idx` divided by its own median over the prior lookback window.
+
+    Below 1.0 means the stock is quieter than its recent norm. Unlike raw ATR%,
+    this is comparable across stocks — a 2% ATR is calm for one name and wild for
+    another. Returns 1.0 (neutral) when there is too little history to judge.
+    """
+    if idx < VOL_REGIME_LOOKBACK or "ATR" not in df.columns:
+        return 1.0
+
+    window = df["ATR"].iloc[idx - VOL_REGIME_LOOKBACK: idx + 1]
+    close = df["Close"].iloc[idx - VOL_REGIME_LOOKBACK: idx + 1]
+    atr_pct = (window / close * 100).dropna()
+    if len(atr_pct) < 2:
+        return 1.0
+
+    median = float(atr_pct.median())
+    current = float(atr_pct.iloc[-1])
+    return current / median if median > 0 else 1.0
+
+
+def passes_vol_regime(df: pd.DataFrame, idx: int, side: str = "long") -> bool:
+    """Entry gate: reject setups fired while the stock is unusually turbulent.
+
+    Long-side only by default — see VOL_REGIME_STRATEGIES. Shorts show no
+    significant effect (p=0.33) and lose net return when the gate is applied.
+    """
+    if not USE_VOL_REGIME_FILTER or side not in VOL_REGIME_STRATEGIES:
+        return True
+    return calculate_vol_regime(df, idx) <= MAX_VOL_REGIME
 
 
 # ── Market breadth ────────────────────────────────────────────────────────────

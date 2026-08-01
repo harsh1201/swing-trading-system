@@ -149,3 +149,52 @@ def test_test_slice_is_disjoint_from_early_stopping_val_slice():
     assert not set(test) & set(val)
     assert not set(test) & set(train)
     assert len(test) > 0
+
+
+# ── Volatility-regime filter ─────────────────────────────────────────────────
+def _ohlc(n=300, atr_spike=False):
+    """Synthetic OHLCV with optional late volatility spike."""
+    import strategies.long_breakout as lb
+    close = pd.Series(np.linspace(100, 140, n))
+    span = pd.Series([1.0] * n)
+    if atr_spike:
+        span.iloc[-30:] = 12.0          # recent bars far more volatile
+    df = pd.DataFrame({
+        "Close": close, "Open": close,
+        "High": close + span, "Low": close - span,
+        "Volume": 1_000_000,
+    })
+    return lb.add_indicators(df)
+
+
+def test_vol_regime_flags_turbulence():
+    """A late volatility spike must read as turbulent (>1), calm data as ~1."""
+    import strategies.long_breakout as lb
+    calm = lb.calculate_vol_regime(_ohlc(), 299)
+    spiked = lb.calculate_vol_regime(_ohlc(atr_spike=True), 299)
+    assert spiked > calm
+    assert spiked > 1.5, f"spike should read well above its own median, got {spiked}"
+
+
+def test_vol_regime_neutral_without_history():
+    """Too little history must return neutral 1.0, never reject blindly."""
+    import strategies.long_breakout as lb
+    assert lb.calculate_vol_regime(_ohlc(), 50) == 1.0
+
+
+def test_vol_regime_gate_is_long_only(monkeypatch):
+    """Shorts show no effect (p=0.33) and lose return when gated — the filter
+    must not apply to them even when enabled."""
+    import strategies.long_breakout as lb
+    df = _ohlc(atr_spike=True)
+    monkeypatch.setattr(lb, "USE_VOL_REGIME_FILTER", True)
+    monkeypatch.setattr(lb, "MAX_VOL_REGIME", 0.0)      # reject everything gated
+    assert lb.passes_vol_regime(df, 299, "long") is False
+    assert lb.passes_vol_regime(df, 299, "short") is True
+
+
+def test_vol_regime_gate_disabled_passes_everything(monkeypatch):
+    import strategies.long_breakout as lb
+    monkeypatch.setattr(lb, "USE_VOL_REGIME_FILTER", False)
+    monkeypatch.setattr(lb, "MAX_VOL_REGIME", 0.0)
+    assert lb.passes_vol_regime(_ohlc(atr_spike=True), 299, "long") is True
