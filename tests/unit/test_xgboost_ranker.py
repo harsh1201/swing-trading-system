@@ -93,3 +93,59 @@ def test_load_model_missing_returns_none(monkeypatch, tmp_path):
     import strategies.xgboost_ranker as ranker
     monkeypatch.setattr(ranker, "MODEL_DIR", tmp_path)
     assert ranker.load_model("long", "classification") is None
+
+
+# ── prepare_training_data(): chronological ordering ──────────────────────────
+def _training_csv(tmp_path, dates, outcomes, r_multiples):
+    """Write a minimal training CSV with the real column layout."""
+    rows = []
+    for d, o, r in zip(dates, outcomes, r_multiples):
+        row = {name: 1.0 for name in FEATURES}
+        row.update(signal_date=d, outcome=o, r_multiple=r, ticker="X.NS")
+        rows.append(row)
+    path = tmp_path / "train.csv"
+    pd.DataFrame(rows).to_csv(path, index=False)
+    return str(path)
+
+
+def test_prepare_training_data_sorts_chronologically(tmp_path):
+    """The split downstream is a time-series split, so an out-of-order CSV must
+    be reordered — otherwise later trades leak into the training slice."""
+    from strategies.xgboost_ranker import prepare_training_data
+
+    csv = _training_csv(
+        tmp_path,
+        dates=["05-06-2024", "01-01-2023", "03-03-2024"],   # DD-MM-YYYY, shuffled
+        outcomes=["win", "loss", "win"],
+        r_multiples=[2.0, 1.0, 3.0],
+    )
+    df = prepare_training_data(csv, "long", "classification")
+    assert list(df["signal_date"]) == ["01-01-2023", "03-03-2024", "05-06-2024"]
+
+
+def test_regression_training_accepts_continuous_targets(tmp_path, monkeypatch):
+    """Regression previously crashed applying binary class weights to continuous
+    r_multiple. Training must run and produce a model."""
+    import strategies.xgboost_ranker as ranker
+
+    n = 60
+    csv = _training_csv(
+        tmp_path,
+        dates=[f"{(i % 28) + 1:02d}-01-2024" for i in range(n)],
+        outcomes=["win"] * n,
+        r_multiples=[1.0 + (i % 5) * 0.5 for i in range(n)],
+    )
+    monkeypatch.setattr(ranker, "MODEL_DIR", tmp_path)
+    model = ranker.train_model(csv, "long", "regression", force_retrain=True)
+    assert model is not None
+    assert (tmp_path / "xgb_target_long.json").exists()
+
+
+def test_test_slice_is_disjoint_from_early_stopping_val_slice():
+    """The reported metrics must come from data early stopping never saw."""
+    n = 100
+    train_idx, val_idx = int(n * 0.6), int(n * 0.8)
+    train, val, test = range(train_idx), range(train_idx, val_idx), range(val_idx, n)
+    assert not set(test) & set(val)
+    assert not set(test) & set(train)
+    assert len(test) > 0

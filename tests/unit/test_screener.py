@@ -1,5 +1,6 @@
 import pytest
 import pandas as pd
+import json
 import sys
 from datetime import datetime, timedelta
 from io import StringIO
@@ -1132,3 +1133,65 @@ def test_update_portfolio_persists_closed_trades(tmp_path, monkeypatch):
     after = {t["ticker"] for t in cache.load("portfolio")["trades"]}
     assert "CLOSEDWIN.NS" in after   # closed win (3d old) survived the run
     assert "PEND.NS" in after
+
+
+# ── Closed-trade archive & live ML export ────────────────────────────────────
+def _closed_trade(**over):
+    """A CLOSED trade old enough for cleanup to prune."""
+    from config.settings import XGB_FEATURE_NAMES
+    t = {
+        "ticker": "ACME.NS", "name": "Acme", "strategy": "long_breakout",
+        "status": "CLOSED", "entry": 100.0, "stop_loss": 95.0, "target": 110.0,
+        "date_added": "01-01-2024", "entry_trigger_date": "02-01-2024",
+        "exit_date": "03-01-2024", "outcome": "WIN", "r_multiple": 2.0,
+        "current_price": 110.0, "score": 70.0, "ml_prob": 0.6, "ml_r": 2.0,
+        "features": {f: 1.0 for f in XGB_FEATURE_NAMES},
+    }
+    t.update(over)
+    return t
+
+
+def test_aged_closed_trade_is_archived_not_lost(tmp_path, monkeypatch):
+    """Cleanup prunes old CLOSED trades from the active view; the row itself must
+    survive in the archive, or live outcomes never become training data."""
+    import screener
+
+    archive = tmp_path / "closed_trades.jsonl"
+    monkeypatch.setattr(screener, "_closed_archive_path", lambda: str(archive))
+
+    cleaned, stats = screener.cleanup_portfolio([_closed_trade()])
+
+    assert cleaned == []                      # pruned from the active portfolio
+    assert stats["closed_cleaned"] == 1
+    assert json.loads(archive.read_text().strip())["ticker"] == "ACME.NS"
+
+
+def test_export_live_ml_writes_training_rows(tmp_path, monkeypatch):
+    import screener
+    from config.settings import XGB_FEATURE_NAMES
+
+    archive = tmp_path / "closed_trades.jsonl"
+    archive.write_text(
+        json.dumps(_closed_trade()) + "\n"
+        + json.dumps(_closed_trade(ticker="OTHER.NS", strategy="short_breakout")) + "\n"
+    )
+    monkeypatch.setattr(screener, "_closed_archive_path", lambda: str(archive))
+
+    out = tmp_path / "live.csv"
+    assert screener.export_live_ml("long_breakout", str(out)) == 1
+
+    df = pd.read_csv(out)
+    assert list(df["ticker"]) == ["ACME.NS"]          # other strategy filtered out
+    assert list(df["outcome"]) == ["win"]             # lowercased to match backtest
+    assert all(f in df.columns for f in XGB_FEATURE_NAMES)
+
+
+def test_export_live_ml_skips_trades_without_features(tmp_path, monkeypatch):
+    """Trades recorded before feature capture landed have no vector to train on."""
+    import screener
+
+    archive = tmp_path / "closed_trades.jsonl"
+    archive.write_text(json.dumps(_closed_trade(features={})) + "\n")
+    monkeypatch.setattr(screener, "_closed_archive_path", lambda: str(archive))
+
+    assert screener.export_live_ml("long_breakout", str(tmp_path / "live.csv")) == 0
