@@ -99,6 +99,49 @@ With the split fixed, the honest numbers are:
 `git checkout -- models/` and remain at their committed state. `xgb_target_short.json`
 is new, untracked, and inert (`USE_XGBOOST_TARGET = False`).
 
+## Feature Exploration — ML still fails, but one rule works
+
+Ten context features (as opposed to more consolidation geometry) were computed for
+every existing training row directly from `storage/` history at the signal bar —
+no backtest re-run needed, since the CSVs carry `ticker` + `signal_date`. Scripts:
+`reports/ml/candidate_features.py`, `reports/ml/evaluate.py`.
+
+**ML verdict is unchanged.** Context features beat geometry in 8 of 8 comparisons,
+but nothing reaches significance:
+
+| feature set | long clf AUC (p) | short clf AUC (p) |
+|---|---|---|
+| baseline (10 geometry) | 0.526 (0.165) | 0.526 (0.239) |
+| candidates (10 context) | 0.539 (0.082) | 0.536 (0.171) |
+| all 20 | 0.513 (0.290) | 0.550 (0.072) |
+
+Combining all 20 *hurts* long (0.513) — 20 features on 600 rows overfits.
+
+**But a univariate screen found a real, stable effect.** `vol_regime`
+(ATR% ÷ its own 100-bar median — is this stock calm or turbulent right now) on the
+long side: **p = 0.0003**, the only result surviving Bonferroni correction across
+all 40 feature×strategy tests.
+
+- Calm tercile **41.4%** win rate vs turbulent tercile **23.7%** (base rate 31.2%).
+- Direction holds in **8 of 8 years** — 2020 +36.7pts, 2022 +38.5pts, 2025 +22.7pts,
+  never negative.
+- As a plain rule with the threshold learned only from prior folds, walk-forward:
+  **31.6% → 34.8% win rate (+3.2pts), positive in 5 of 5 folds**, keeping 64% of
+  setups.
+
+Second-ranked was `market_breadth` (p = 0.012, 35.9% vs 24.2%) — the very feature
+that P0-1 had been serving as `0.0`. The one baseline feature carrying signal was
+the one the bug destroyed.
+
+> The pattern across every test in this ADR: the effects here are univariate and
+> monotonic, which a threshold rule captures and a boosted-tree model on 600 rows
+> cannot learn without overfitting. The lever is a filter, not a bigger model.
+
+**Not implemented.** Adding a `vol_regime` entry filter changes live trade selection
+and discards ~36% of setups; net profitability requires a backtest with the filter
+applied, which the +3.2pts win-rate figure does not by itself establish (`r_multiple`
+is MFE, so true expectancy cannot be computed from these CSVs).
+
 ## Explicitly Not Done
 - **`PORTFOLIO_MIN_ML` stays at 0.45.** Owner's call, taken with the 0.494 holdout
   AUC on the table. Until a retrained model clears ~0.55 out-of-sample, that gate
