@@ -1195,3 +1195,40 @@ def test_export_live_ml_skips_trades_without_features(tmp_path, monkeypatch):
     monkeypatch.setattr(screener, "_closed_archive_path", lambda: str(archive))
 
     assert screener.export_live_ml("long_breakout", str(tmp_path / "live.csv")) == 0
+
+
+# ── Screener / backtest parity ───────────────────────────────────────────────
+def test_vol_regime_gate_applied_in_both_screener_and_backtest():
+    """long_breakout.py is the single source of truth: any entry gate must run in
+    BOTH the live screener and the backtest. A gate present in only one makes the
+    backtest a fiction — live selection would silently diverge from it."""
+    import re
+    screener_src = open("screener.py").read()
+    backtest_src = open("backtest.py").read()
+    for src, name in ((screener_src, "screener.py"), (backtest_src, "backtest.py")):
+        for side in ("long", "short"):
+            assert re.search(rf'passes_vol_regime\(.*"{side}"\)', src), \
+                f"{name} is missing the vol-regime gate on the {side} scan path"
+
+
+def test_market_breadth_reference_is_the_most_current_frame(monkeypatch):
+    """Breadth measures every symbol as of the reference frame's last bar, so a
+    stale (delisted/halted) frame must never become the reference."""
+    import screener
+    idx_old = pd.date_range("2024-01-01", periods=300, freq="D")
+    idx_new = pd.date_range("2026-01-01", periods=300, freq="D")
+    def frame(idx, close):
+        return pd.DataFrame({"Close": close, "EMA50": close - 1.0}, index=idx)
+    universe = {
+        "STALE.NS": frame(idx_old, 100.0),   # first in dict order, but delisted
+        "LIVE.NS": frame(idx_new, 100.0),
+    }
+    monkeypatch.setattr(screener, "load_universe", lambda: (universe, 0))
+    captured = {}
+    def spy(all_data, i, reference_df):
+        captured["ref_last"] = reference_df.index[-1]
+        return 55.0
+    monkeypatch.setattr(screener, "calculate_market_breadth", spy)
+    screener.market_breadth()
+    assert captured["ref_last"] == idx_new[-1], \
+        "breadth dated itself to a stale frame instead of the most current one"

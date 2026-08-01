@@ -104,6 +104,7 @@ from strategies.long_breakout import (
     calculate_trade_setup,
     extract_ml_features,
     calculate_market_breadth,
+    passes_vol_regime,
 )
 from strategies.short_breakout import (
     TrendResult as ShortTrendResult,
@@ -589,9 +590,13 @@ def market_breadth() -> float:
     the model a value that appears nowhere in its training data.
     """
     data, _ = load_universe()
-    ref = next(iter(data.values()), None)
-    if ref is None:
+    if not data:
         return 0.0
+    # calculate_market_breadth measures every symbol as of the reference frame's
+    # last bar, so the reference must be a *current* series. Picking dict-order
+    # first would silently date the whole measurement to a delisted or halted
+    # symbol's final bar; take the most recently updated frame instead.
+    ref = max(data.values(), key=lambda d: d.index[-1])
     return calculate_market_breadth(data, len(ref) - 1, ref)
 
 
@@ -1567,6 +1572,11 @@ def run_screener() -> None:
 
         score = score_long_breakout(trend, coil)
 
+        # Volatility-regime gate — must mirror backtest.py, or live selection
+        # silently diverges from the backtested strategy.
+        if not passes_vol_regime(df, len(df) - 1, "long"):
+            continue
+
         # ML feature vector (shared by regressor + classifier)
         ml_features = None
         if (xgb_model is not None or xgb_clf_model is not None) and XGB_AVAILABLE:
@@ -2070,6 +2080,11 @@ def run_screener_short() -> None:
 
         score = score_short_breakout(trend, coil)
 
+        # Volatility-regime gate — must mirror backtest.py, or live selection
+        # silently diverges from the backtested strategy.
+        if not passes_vol_regime(df, len(df) - 1, "short"):
+            continue
+
         # ML feature vector (shared by regressor + classifier)
         ml_features = None
         if (xgb_model is not None or xgb_clf_model is not None) and XGB_AVAILABLE:
@@ -2186,6 +2201,20 @@ def run_screener_short() -> None:
     print()
 
 
+def _approx_bars_held(t: dict) -> int:
+    """Trading bars a trade was open, approximated from its dates.
+
+    The archive stores dates, not bar indices, so this converts calendar days at
+    5/7 to approximate sessions. Metadata only — `bars_held` is not a model
+    feature — but writing a real number beats writing a placebo 0.
+    """
+    start = _parse_ddmmyyyy(t.get("entry_trigger_date", "")) or _parse_ddmmyyyy(t.get("date_added", ""))
+    end = _parse_ddmmyyyy(t.get("exit_date", ""))
+    if start is None or end is None or end < start:
+        return 0
+    return int((end - start).days * 5 / 7)
+
+
 def export_live_ml(strategy: str, out_path: str) -> int:
     """Write archived live trades out as training rows.
 
@@ -2222,7 +2251,7 @@ def export_live_ml(strategy: str, out_path: str) -> int:
                 "target": t.get("target", 0.0),
                 "r_multiple": t.get("r_multiple", 0.0),
                 "outcome": str(t.get("outcome", "")).lower(),
-                "bars_held": 0,
+                "bars_held": _approx_bars_held(t),
             })
 
     if skipped_no_features:
