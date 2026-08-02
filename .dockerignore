@@ -13,3 +13,14 @@ tasks
 *.md
 pytest.ini
 .gitignore
+
+# Runtime data — /app/storage is the swing_data volume mount point (fly.toml),
+# so anything baked in here is shadowed at runtime. 312 MB uploaded for nothing.
+# data/cache.py recreates the directory at import via os.makedirs(exist_ok=True).
+storage/
+
+# Local tooling — never needed in the image
+SEARCH/
+.claude/
+.DS_Store
+.coverage
