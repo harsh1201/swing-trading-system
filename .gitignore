@@ -30,3 +30,8 @@ env/
 # Static types/cache
 .mypy_cache/
 .pytest_cache/
+
+# OS / tooling artifacts — regenerate locally, never belong in the repo
+.DS_Store
+.coverage
+SEARCH/
