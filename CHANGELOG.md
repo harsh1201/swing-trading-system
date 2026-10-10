@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.19] - 2026-10-10
+
+### Added
+- **Unified Long & Short ML Training Pipeline**: Enhanced `strategies/xgboost_ranker.py` with multi-strategy (`--strategy long|short|all`) and multi-mode (`--mode classification|regression|all`) support.
+- **One-Command Training (`--train-all`)**: Added automated training for all 4 swing trading models (long classification, long regression, short classification, short regression).
+- **Out-of-Sample Evaluation Metrics**: Added comprehensive classification (AUC-ROC, Accuracy, Precision, Recall, F1) and regression (MAE, RMSE, R²) metric logging.
+- **Legacy Feature Name Mapping**: Added feature name mapping in `show_importance` to cleanly map legacy `f0..f9` indices to descriptive feature names.
+
+### Fixed
+- **XGBoost & Scikit-Learn 1.6+ Compatibility**: Added automatic estimator type compatibility patch preventing `TypeError: _estimator_type undefined` during `save_model` and `load_model`.
+- **Candidate Feature Import**: Fixed hardcoded temporary path in `reports/ml/evaluate.py` to cleanly import `CANDIDATES`.
+
 ## [1.18] - 2026-06-27
 
 ### Fixed
