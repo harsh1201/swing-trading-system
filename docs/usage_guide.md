@@ -76,6 +76,28 @@ The backtester provides a comprehensive summary after simulating years of data:
 
 ---
 
+## 🤖 Machine Learning Training (`strategies/xgboost_ranker.py`)
+
+Train XGBoost models for Win Probability Classification and Dynamic Target R-Multiple Regression across both Long and Short swing trade strategies.
+
+### **Common Commands**
+```bash
+# Train specific strategy and mode
+python -m strategies.xgboost_ranker --train reports/ml/training_data_long.csv --strategy long --mode classification
+python -m strategies.xgboost_ranker --train reports/ml/training_data_short.csv --strategy short --mode classification
+
+# Train all 4 models (long/short classification & regression) automatically
+python -m strategies.xgboost_ranker --train-all --force
+
+# Inspect feature importance across models
+python -m strategies.xgboost_ranker --importance --strategy all --mode all
+
+# Run model predictions from a candidate feature CSV
+python -m strategies.xgboost_ranker --predict candidates.csv --strategy long --mode classification
+```
+
+---
+
 ## 🧭 Daily Workflow (Recommended)
 
 1.  **Market Check (Morning)**: Run `screener.py` to check the **Market Regime**.

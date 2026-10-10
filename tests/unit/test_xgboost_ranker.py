@@ -141,6 +141,59 @@ def test_regression_training_accepts_continuous_targets(tmp_path, monkeypatch):
     assert (tmp_path / "xgb_target_long.json").exists()
 
 
+def test_classification_training_long_and_short(tmp_path, monkeypatch):
+    """Classification training must work for both long and short strategies."""
+    import strategies.xgboost_ranker as ranker
+
+    n = 60
+    long_csv = _training_csv(
+        tmp_path,
+        dates=[f"{(i % 28) + 1:02d}-01-2024" for i in range(n)],
+        outcomes=["win" if i % 3 == 0 else "loss" for i in range(n)],
+        r_multiples=[2.0 if i % 3 == 0 else 0.5 for i in range(n)],
+    )
+    short_csv = tmp_path / "training_data_short.csv"
+    pd.read_csv(long_csv).to_csv(short_csv, index=False)
+
+    monkeypatch.setattr(ranker, "MODEL_DIR", tmp_path)
+    
+    # Train long classification
+    m_long = ranker.train_model(long_csv, "long", "classification", force_retrain=True)
+    assert m_long is not None
+    assert (tmp_path / "xgb_classifier_long.json").exists()
+
+    # Train short classification
+    m_short = ranker.train_model(str(short_csv), "short", "classification", force_retrain=True)
+    assert m_short is not None
+    assert (tmp_path / "xgb_classifier_short.json").exists()
+
+
+def test_train_all_models(tmp_path, monkeypatch):
+    """train_all_models should train all 4 models and return a dictionary with all results."""
+    import strategies.xgboost_ranker as ranker
+
+    n = 60
+    for strat in ("long", "short"):
+        csv_file = tmp_path / f"training_data_{strat}.csv"
+        rows = []
+        for i in range(n):
+            row = {name: 1.0 for name in ranker.FEATURES}
+            row.update(
+                signal_date=f"{(i % 28) + 1:02d}-01-2024",
+                outcome="win" if i % 3 == 0 else "loss",
+                r_multiple=2.0 if i % 3 == 0 else 0.5,
+                ticker="TEST.NS",
+            )
+            rows.append(row)
+        pd.DataFrame(rows).to_csv(csv_file, index=False)
+
+    monkeypatch.setattr(ranker, "MODEL_DIR", tmp_path)
+    results = ranker.train_all_models(data_dir=str(tmp_path), force_retrain=True)
+    assert len(results) == 4
+    for key in ("long_classification", "long_regression", "short_classification", "short_regression"):
+        assert results[key] is not None
+
+
 def test_test_slice_is_disjoint_from_early_stopping_val_slice():
     """The reported metrics must come from data early stopping never saw."""
     n = 100

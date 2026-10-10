@@ -14,9 +14,10 @@ from sklearn.metrics import roc_auc_score
 from scipy.stats import spearmanr
 
 sys.path.insert(0, ".")
-from config.settings import XGB_FEATURE_NAMES
-sys.path.insert(0, "/private/tmp/claude-501/-Users-manmadeanyme-Documents-Work-swing-trading-system/11ae5db3-420c-4579-805b-047a31a3ea93/scratchpad")
-from candidate_features import CANDIDATES
+try:
+    from reports.ml.candidate_features import CANDIDATES
+except ImportError:
+    from candidate_features import CANDIDATES
 
 BASE = list(XGB_FEATURE_NAMES)
 RNG = np.random.default_rng(0)

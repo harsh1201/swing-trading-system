@@ -1,7 +1,7 @@
 # AGENTS.md - Swing Trading System Context
 
-> **Last Updated:** 2026-06-27
-> **Version:** 1.18 (Discord F&O Tagging)
+> **Last Updated:** 2026-10-10
+> **Version:** 1.19 (Unified Long & Short ML Training Pipeline)
 > **Maintainer:** Project Owner
 
 
@@ -272,6 +272,18 @@ Portfolio summary auto-posts to Discord when screener runs.
 ---
 
 ## Changelog
+
+### 2026-10-10 (v1.19 - Unified Long & Short ML Training Pipeline)
+
+### Added
+- **Unified Long & Short ML Training**: `strategies/xgboost_ranker.py` supports training Long and Short swing trade models across classification (win probability) and regression (dynamic R-multiple target).
+- **Automated All-Model Training (`--train-all`)**: Single command trains all 4 models (`xgb_classifier_long.json`, `xgb_target_long.json`, `xgb_classifier_short.json`, `xgb_target_short.json`).
+- **Comprehensive Out-of-Sample Metrics**: Added AUC-ROC, Accuracy, Precision, Recall, F1, LogLoss, MAE, RMSE, and R² logging.
+- **Feature Name Mapping**: Legacy `f0..f9` feature representations now cleanly map to named features in importance outputs.
+
+### Fixed
+- **XGBoost & Scikit-Learn 1.6+ Compatibility**: Fixed `TypeError: _estimator_type undefined` during `save_model` and `load_model`.
+- **Import Path Fix in Feature Evaluation**: Cleaned up relative imports in `reports/ml/evaluate.py`.
 
 ### 2026-06-27 (v1.18 - Discord F&O Tagging)
 
