@@ -261,6 +261,8 @@ def train_model(
         model._estimator_type = "regressor"
         eval_metric_name = "MAE"
 
+    model._estimator_type = "classifier" if mode == "classification" else "regressor"
+
     model.fit(
         X_train, y_train,
         sample_weight=sample_weights,
