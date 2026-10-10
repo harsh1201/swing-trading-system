@@ -251,3 +251,34 @@ def test_vol_regime_gate_disabled_passes_everything(monkeypatch):
     monkeypatch.setattr(lb, "USE_VOL_REGIME_FILTER", False)
     monkeypatch.setattr(lb, "MAX_VOL_REGIME", 0.0)
     assert lb.passes_vol_regime(_ohlc(atr_spike=True), 299, "long") is True
+
+
+def test_estimator_type_set_on_models(tmp_path, monkeypatch):
+    """Ensure _estimator_type is explicitly defined as 'regressor' or 'classifier' on trained and loaded models."""
+    import strategies.xgboost_ranker as ranker
+
+    n = 60
+    csv = _training_csv(
+        tmp_path,
+        dates=[f"{(i % 28) + 1:02d}-01-2024" for i in range(n)],
+        outcomes=["win" if i % 2 == 0 else "loss" for i in range(n)],
+        r_multiples=[1.5 + (i % 3) * 0.5 for i in range(n)],
+    )
+    monkeypatch.setattr(ranker, "MODEL_DIR", tmp_path)
+
+    reg_model = ranker.train_model(csv, "long", "regression", force_retrain=True)
+    assert reg_model is not None
+    assert getattr(reg_model, "_estimator_type", None) == "regressor"
+
+    clf_model = ranker.train_model(csv, "long", "classification", force_retrain=True)
+    assert clf_model is not None
+    assert getattr(clf_model, "_estimator_type", None) == "classifier"
+
+    loaded_reg = ranker.load_model("long", "regression")
+    assert loaded_reg is not None
+    assert getattr(loaded_reg, "_estimator_type", None) == "regressor"
+
+    loaded_clf = ranker.load_model("long", "classification")
+    assert loaded_clf is not None
+    assert getattr(loaded_clf, "_estimator_type", None) == "classifier"
+

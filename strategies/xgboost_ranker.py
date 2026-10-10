@@ -85,6 +85,7 @@ def load_model(strategy: str = "long", mode: str = "regression"):
 
         klass = xgb.XGBClassifier if mode == "classification" else xgb.XGBRegressor
         model = klass()
+        model._estimator_type = "classifier" if mode == "classification" else "regressor"
         model.load_model(str(path))
         return model
     except Exception as e:
@@ -238,6 +239,7 @@ def train_model(
             random_state=42,
             verbosity=0,
         )
+        model._estimator_type = "classifier"
         eval_metric_name = "LogLoss"
     else:
         model = xgb.XGBRegressor(
@@ -256,6 +258,7 @@ def train_model(
             random_state=42,
             verbosity=0,
         )
+        model._estimator_type = "regressor"
         eval_metric_name = "MAE"
 
     model.fit(
@@ -303,6 +306,10 @@ def train_model(
     print(f"  Best iteration: {model.best_iteration}")
 
     path.parent.mkdir(parents=True, exist_ok=True)
+    
+    if not hasattr(model, "_estimator_type") or model._estimator_type is None:
+        model._estimator_type = "regressor" if mode == "regression" else "classifier"
+        
     model.save_model(str(path))
     print(f"  [+] Model saved: {path}")
 
