@@ -9,3 +9,4 @@
 | [ADR-003](TASK-003_reliability-hardening.md) | 2026-07-08 | Reliability Hardening | Implemented |
 | [ADR-004](TASK-004_tracking-loop-correctness.md) | 2026-07-08 | Tracking-Loop Correctness | Implemented |
 | [ADR-005](TASK-005_ml-train-serve-skew.md) | 2026-08-02 | ML Train/Serve Skew & Training-Data Capture | Implemented |
+| [ADR-107](TASK-107_live-trade-ml-retraining.md) | 2026-10-14 | Live Trade ML Retraining & Fly Volume Ingestion | Implemented |

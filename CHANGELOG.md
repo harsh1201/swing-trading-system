@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.20] - 2026-10-14
+
+### Added
+- **Live Trade ML Retraining**: Ingested 54 completed live production trades (29 Long, 25 Short) from the Fly.io persistent volume into `reports/ml/training_data_long.csv` (660 rows) and `reports/ml/training_data_short.csv` (503 rows).
+- **Updated XGBoost Models**: Retrained all 4 XGBoost models (`xgb_classifier_long.json`, `xgb_target_long.json`, `xgb_classifier_short.json`, `xgb_target_short.json`) with the expanded live trade outcomes.
+
 ## [1.19] - 2026-10-10
 
 ### Added
